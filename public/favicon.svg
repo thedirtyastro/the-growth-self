@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" fill="#F1F0ED" />
+  <rect x="1" y="1" width="62" height="62" stroke="#D9D6CF" stroke-width="2" />
+  <!-- Standing editorial hardcover volume -->
+  <rect x="14" y="11" width="32" height="42" fill="#201F1C" />
+  <!-- Spine crease -->
+  <line x1="20" y1="11" x2="20" y2="53" stroke="#FAF9F6" stroke-opacity="0.24" stroke-width="1.5" />
+  <!-- Paper block fore-edge -->
+  <rect x="46" y="13" width="4" height="38" fill="#FAF9F6" stroke="#201F1C" stroke-width="1.5" />
+  <!-- Terracotta bookmark ribbon -->
+  <path d="M34 11H41V29L37.5 25.5L34 29V11Z" fill="#B96F58" />
+  <!-- Subtle horizontal foil rule -->
+  <line x1="24" y1="38" x2="41" y2="38" stroke="#FAF9F6" stroke-opacity="0.85" stroke-width="1.5" />
+  <line x1="24" y1="43" x2="36" y2="43" stroke="#FAF9F6" stroke-opacity="0.55" stroke-width="1.5" />
+</svg>

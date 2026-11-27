@@ -1,0 +1,6 @@
+{
+  "name": "The Growth Shelf",
+  "description": "A local-first personal bookshelf and PDF reading studio with a 3D hardcover reader, text highlighting, notes, and reading reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
