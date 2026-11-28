@@ -605,11 +605,24 @@ export function ReaderPage() {
     commitCurrentDwell,
   ]);
 
+  const exitFullscreenIfNeeded = useCallback(async () => {
+    setIsFullscreen(false);
+    if (typeof document !== 'undefined' && document.fullscreenElement) {
+      try {
+        await document.exitFullscreen();
+      } catch {
+        // Ignore if browser rejected exitFullscreen
+      }
+    }
+  }, []);
+
   const finishClose = useCallback(() => {
+    void exitFullscreenIfNeeded();
     navigate(book ? `/books/${book.id}` : '/');
-  }, [navigate, book]);
+  }, [exitFullscreenIfNeeded, navigate, book]);
 
   const executeAnimatedClose = useCallback(() => {
+    void exitFullscreenIfNeeded();
     if (use3dEngine && settings.animation !== 'off') {
       setClosing3d(true);
       window.setTimeout(() => {
@@ -618,7 +631,7 @@ export function ReaderPage() {
     } else {
       finishClose();
     }
-  }, [use3dEngine, settings.animation, finishClose]);
+  }, [exitFullscreenIfNeeded, use3dEngine, settings.animation, finishClose]);
 
   const handleCloseReader = useCallback(async () => {
     if (!book) {
@@ -713,7 +726,12 @@ export function ReaderPage() {
       }
     };
     document.addEventListener('fullscreenchange', onFsChange);
-    return () => document.removeEventListener('fullscreenchange', onFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      if (document.fullscreenElement) {
+        void document.exitFullscreen().catch(() => {});
+      }
+    };
   }, []);
 
   const handleToggleFullscreen = useCallback(async () => {

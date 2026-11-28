@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Maximize2, Minimize2 } from 'lucide-react';
 import { formatPageNumber } from '../../lib/domain/status';
 
 interface ReaderControlsProps {
@@ -71,7 +72,7 @@ export function ReaderControls({
     >
       {/* Top Bar */}
       <header
-        className={`pointer-events-auto flex h-14 items-center justify-between px-5 md:px-10 transition-colors ${
+        className={`pointer-events-auto flex h-14 items-center justify-between gap-2 px-3 sm:px-6 md:px-10 transition-colors ${
           isFullscreen
             ? 'bg-gradient-to-b from-[var(--reader-bg)]/95 via-[var(--reader-bg)]/75 to-transparent'
             : ''
@@ -80,31 +81,32 @@ export function ReaderControls({
         <button
           type="button"
           onClick={onClose}
-          className="inline-flex h-11 items-center text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors cursor-pointer"
+          className="inline-flex h-11 min-w-0 items-center text-[10px] sm:text-[11px] font-medium uppercase tracking-[0.14em] sm:tracking-[0.16em] text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
-          THE GROWTH SHELF
+          <span className="hidden sm:inline">THE GROWTH SHELF</span>
+          <span className="sm:hidden">SHELF</span>
         </button>
 
-        <div className="flex items-center gap-4 md:gap-7">
+        <div className="flex items-center gap-2.5 sm:gap-5 md:gap-7 shrink-0">
           {!hasTextLayer && (
             <button
               type="button"
               onClick={onToggleAreaHighlight}
               aria-pressed={areaHighlightMode}
-              className={`inline-flex h-11 items-center px-2 text-[11px] font-medium uppercase tracking-[0.14em] transition-colors cursor-pointer ${
+              className={`inline-flex h-11 items-center px-1.5 sm:px-2 text-[10px] sm:text-[11px] font-medium uppercase tracking-[0.12em] sm:tracking-[0.14em] transition-colors whitespace-nowrap cursor-pointer ${
                 areaHighlightMode
                   ? 'text-[var(--accent-hover)] underline underline-offset-4'
                   : 'text-[var(--foreground-secondary)] hover:text-[var(--foreground)]'
               }`}
             >
-              {areaHighlightMode ? 'AREA HIGHLIGHT: ON' : 'AREA HIGHLIGHT'}
+              {areaHighlightMode ? 'AREA: ON' : 'AREA'}
             </button>
           )}
 
           <button
             type="button"
             onClick={onToggleNotes}
-            className="inline-flex h-11 items-center px-1 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors cursor-pointer"
+            className="inline-flex h-11 items-center px-1 text-[10px] sm:text-[11px] font-medium uppercase tracking-[0.12em] sm:tracking-[0.14em] text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap cursor-pointer"
           >
             NOTES
           </button>
@@ -113,20 +115,20 @@ export function ReaderControls({
             type="button"
             onClick={onToggleBookmark}
             aria-pressed={isBookmarked}
-            className={`inline-flex h-11 items-center px-1 text-[11px] font-medium uppercase tracking-[0.14em] transition-colors cursor-pointer ${
+            className={`inline-flex h-11 items-center px-1 text-[10px] sm:text-[11px] font-medium uppercase tracking-[0.12em] sm:tracking-[0.14em] transition-colors whitespace-nowrap cursor-pointer ${
               isBookmarked
                 ? 'text-[var(--accent-hover)] underline underline-offset-4'
                 : 'text-[var(--foreground)] hover:text-[var(--accent-hover)]'
             }`}
           >
-            {isBookmarked ? 'BOOKMARKED' : 'BOOKMARK'}
+            {isBookmarked ? 'SAVED' : 'BOOKMARK'}
           </button>
 
           <button
             type="button"
             onClick={onToggleSettings}
             aria-label="Reader appearance and settings"
-            className="inline-flex h-11 items-center px-1 text-[13px] font-medium text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors cursor-pointer"
+            className="inline-flex h-11 items-center px-1 text-[13px] font-medium text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap cursor-pointer"
           >
             Aa
           </button>
@@ -134,15 +136,23 @@ export function ReaderControls({
           <button
             type="button"
             onClick={onToggleFullscreen}
-            className="hidden sm:inline-flex h-11 items-center px-1 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors cursor-pointer"
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            className="inline-flex h-11 items-center gap-1.5 px-1 text-[10px] sm:text-[11px] font-medium uppercase tracking-[0.12em] sm:tracking-[0.14em] text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap cursor-pointer"
           >
-            {isFullscreen ? 'EXIT FULLSCREEN' : 'FULLSCREEN'}
+            {isFullscreen ? (
+              <Minimize2 className="h-3.5 w-3.5 sm:hidden" />
+            ) : (
+              <Maximize2 className="h-3.5 w-3.5 sm:hidden" />
+            )}
+            <span className="hidden sm:inline">
+              {isFullscreen ? 'EXIT FULLSCREEN' : 'FULLSCREEN'}
+            </span>
           </button>
 
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex h-11 items-center px-1 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors cursor-pointer"
+            className="inline-flex h-11 items-center px-1 text-[10px] sm:text-[11px] font-medium uppercase tracking-[0.12em] sm:tracking-[0.14em] text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap cursor-pointer"
           >
             CLOSE
           </button>

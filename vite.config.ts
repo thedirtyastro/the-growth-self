@@ -25,6 +25,17 @@ export default defineConfig(() => {
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
           }
+
+          // Ensure direct navigation to SPA routes (/books, /journal, /reports) works on static hosts
+          const indexHtml = path.resolve(distDir, 'index.html');
+          if (fs.existsSync(indexHtml)) {
+            fs.copyFileSync(indexHtml, path.resolve(distDir, '404.html'));
+            for (const route of ['books', 'journal', 'reports']) {
+              const routeDir = path.resolve(distDir, route);
+              fs.mkdirSync(routeDir, {recursive: true});
+              fs.copyFileSync(indexHtml, path.resolve(routeDir, 'index.html'));
+            }
+          }
         },
       },
     ],
