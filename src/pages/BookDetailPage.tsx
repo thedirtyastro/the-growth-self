@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { format } from 'date-fns';
 import {
@@ -6,39 +6,51 @@ import {
   BarChart3,
   BookOpen,
   CheckCircle2,
+  ChevronDown,
   Pencil,
   PenLine,
   Plus,
+  RotateCcw,
   Tag,
   X,
 } from 'lucide-react';
 import { useLibraryStore } from '../store/library';
 import { useUiStore } from '../store/ui';
-import { computeBookProgress, formatPageNumber } from '../lib/domain/status';
+import { formatPageNumber } from '../lib/domain/status';
 import { formatDurationCompact } from '../lib/domain/heatmap';
+import {
+  createInitialProgress,
+  deriveStatus,
+  stats as computeProgressStats,
+  type FinishChoice,
+} from '../lib/domain/reading';
 import { collectLibraryTags, mergeUniqueTags, normalizeTag } from '../lib/domain/tags';
 import { PageTransition } from '../components/shell/PageTransition';
 import { Badge } from '../components/shell/Badge';
 import { Button } from '../components/shell/Button';
 import { ProgressLine } from '../components/shell/ProgressLine';
 import { BookCover } from '../components/detail/BookCover';
+import { PageMap } from '../components/detail/PageMap';
 import { EditBookModal } from '../components/detail/EditBookModal';
+import { FinishPrompt } from '../components/reader/FinishPrompt';
 
 export function BookDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
   const books = useLibraryStore((s) => s.books);
+  const progressByBook = useLibraryStore((s) => s.progressByBook);
   const hydrated = useLibraryStore((s) => s.hydrated);
   const highlights = useLibraryStore((s) => s.highlights);
   const journal = useLibraryStore((s) => s.journal);
   const bookmarks = useLibraryStore((s) => s.bookmarks);
   const sessions = useLibraryStore((s) => s.sessions);
-  const markCompleted = useLibraryStore((s) => s.markCompleted);
   const setBookStatus = useLibraryStore((s) => s.setBookStatus);
+  const setContentRange = useLibraryStore((s) => s.setContentRange);
+  const applyFinishChoice = useLibraryStore((s) => s.applyFinishChoice);
+  const readBookAgain = useLibraryStore((s) => s.readBookAgain);
   const addBookTag = useLibraryStore((s) => s.addBookTag);
   const removeBookTag = useLibraryStore((s) => s.removeBookTag);
-  const resetBookProgress = useLibraryStore((s) => s.resetBookProgress);
   const removeBook = useLibraryStore((s) => s.removeBook);
 
   const openNoteModal = useUiStore((s) => s.openNoteModal);
@@ -47,8 +59,46 @@ export function BookDetailPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
+  const [finishMenuOpen, setFinishMenuOpen] = useState(false);
+  const [finishPromptOpen, setFinishPromptOpen] = useState(false);
+  const [confirmWeakCoverage, setConfirmWeakCoverage] = useState<number | null>(null);
+  const [rangeStartDraft, setRangeStartDraft] = useState('1');
+  const [rangeEndDraft, setRangeEndDraft] = useState('1');
+  const [rangeError, setRangeError] = useState<string | null>(null);
+  const finishMenuRef = useRef<HTMLDivElement>(null);
 
   const book = books.find((b) => b.id === id);
+  const progress = book
+    ? progressByBook[book.id] ??
+      createInitialProgress(book.id, book.totalPages, book.status, book.completedAt)
+    : undefined;
+
+  useEffect(() => {
+    if (!progress) return;
+    setRangeStartDraft(String(progress.contentStart));
+    setRangeEndDraft(String(progress.contentEnd));
+    setRangeError(null);
+  }, [book?.id, progress?.contentStart, progress?.contentEnd]);
+
+  useEffect(() => {
+    if (!finishMenuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (finishMenuRef.current && !finishMenuRef.current.contains(e.target as Node)) {
+        setFinishMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setFinishMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [finishMenuOpen]);
 
   const suggestedTags = useMemo(() => {
     const summary = collectLibraryTags(books);
@@ -93,7 +143,7 @@ export function BookDetailPage() {
     );
   }
 
-  if (!book) {
+  if (!book || !progress) {
     return (
       <PageTransition>
         <main className="mx-auto max-w-[1440px] px-5 py-16 md:px-8 lg:px-12">
@@ -117,25 +167,64 @@ export function BookDetailPage() {
     );
   }
 
-  const progress =
-    book.status === 'completed'
-      ? 100
-      : book.status === 'not-started'
-        ? 0
-        : computeBookProgress(book.currentPage, book.totalPages);
+  const derivedStatus = deriveStatus(progress);
+  const readStats = computeProgressStats(progress);
+  const displayPage = derivedStatus === 'not-started' ? 0 : progress.position;
+  const effectiveSeconds = Math.max(
+    stats.durationSeconds,
+    Math.round(readStats.activeMs / 1000)
+  );
 
   const primaryActionLabel =
-    book.status === 'completed'
+    derivedStatus === 'completed'
       ? 'READ AGAIN'
-      : book.status === 'not-started'
+      : derivedStatus === 'not-started'
         ? 'START READING'
         : 'CONTINUE READING';
 
   const handlePrimaryRead = async () => {
-    if (book.status === 'completed') {
-      await resetBookProgress(book.id);
+    if (derivedStatus === 'completed') {
+      await readBookAgain(book.id);
     }
     navigate(`/read/${book.id}`);
+  };
+
+  const handleFinishChoice = async (choice: FinishChoice) => {
+    const outcome = await applyFinishChoice(book.id, choice);
+    if (outcome?.needsConfirm) {
+      setConfirmWeakCoverage(outcome.coverage ?? null);
+      return;
+    }
+    setFinishPromptOpen(false);
+    setConfirmWeakCoverage(null);
+    if (choice === 'elsewhere') {
+      showBanner(`Marked "${book.title}" finished (read elsewhere).`);
+    } else if (choice === 'skimmed') {
+      showBanner(`Marked "${book.title}" finished (skimmed).`);
+    } else {
+      showBanner(`Marked "${book.title}" completed.`);
+    }
+  };
+
+  const handleSaveRange = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const start = Math.floor(Number(rangeStartDraft));
+    const end = Math.floor(Number(rangeEndDraft));
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      start < 1 ||
+      end > book.totalPages ||
+      start >= end
+    ) {
+      setRangeError(
+        `Enter valid pages between 1 and ${book.totalPages} with start before end.`
+      );
+      return;
+    }
+    setRangeError(null);
+    await setContentRange(book.id, start, end, true);
+    showBanner(`Updated main-text range to pages ${start}–${end}.`);
   };
 
   const handleRemove = async () => {
@@ -182,24 +271,28 @@ export function BookDetailPage() {
             {/* Progress Meta Row */}
             <div className="mt-7 flex flex-wrap items-center gap-4">
               <Link
-                to={`/books?status=${book.status}`}
-                aria-label={`Filter collection by status ${book.status}`}
+                to={`/books?status=${derivedStatus}`}
+                aria-label={`Filter collection by status ${derivedStatus}`}
                 className="inline-flex focus-visible:outline-2 focus-visible:outline-[var(--foreground)] focus-visible:outline-offset-2"
               >
-                <Badge status={book.status} />
+                <Badge status={derivedStatus} completionType={progress.completionType} />
               </Link>
               <span className="editorial-label tabular-nums text-[var(--foreground)]">
-                {formatPageNumber(book.currentPage, book.totalPages)}
+                {formatPageNumber(displayPage, book.totalPages)}
               </span>
               <span className="editorial-label tabular-nums text-[var(--foreground-secondary)]">
-                {book.status === 'completed' && book.completedAt
-                  ? `COMPLETED ${format(new Date(book.completedAt), 'MMM d, yyyy').toUpperCase()}`
-                  : `${progress}% COMPLETE`}
+                {derivedStatus === 'completed' && progress.completedAt
+                  ? `${readStats.percent}% READ · COMPLETED ${format(new Date(progress.completedAt), 'MMM d, yyyy').toUpperCase()}`
+                  : `${readStats.percent}% READ`}
               </span>
             </div>
 
             <div className="mt-3 max-w-[560px]">
-              <ProgressLine percent={progress} />
+              <ProgressLine percent={readStats.percent} />
+            </div>
+
+            <div className="mt-2 max-w-[560px]">
+              <PageMap progress={progress} />
             </div>
 
             {/* Action Buttons */}
@@ -217,7 +310,7 @@ export function BookDetailPage() {
               </Button>
               <Button
                 variant="tertiary"
-                onClick={() => openNoteModal(book.id, Math.max(1, book.currentPage))}
+                onClick={() => openNoteModal(book.id, Math.max(1, displayPage || 1))}
               >
                 <PenLine className="mr-1.5 h-3.5 w-3.5" />
                 ADD NOTE
@@ -405,10 +498,10 @@ export function BookDetailPage() {
           <div className="mt-4 grid grid-cols-2 gap-6 border-t border-[var(--border)] pt-5 sm:grid-cols-3 lg:grid-cols-5">
             <div>
               <p className="editorial-label text-[var(--foreground-secondary)]">
-                CURRENT PAGE
+                POSITION
               </p>
               <p className="mt-2 font-display text-[30px] font-medium leading-tight text-[var(--foreground)] tabular-nums">
-                {book.currentPage}
+                {displayPage}
               </p>
             </div>
             <div>
@@ -438,12 +531,78 @@ export function BookDetailPage() {
                 TIME READ
               </p>
               <p className="mt-2 font-display text-[30px] font-medium leading-tight text-[var(--foreground)] tabular-nums">
-                {stats.durationSeconds >= 60
-                  ? formatDurationCompact(stats.durationSeconds)
+                {effectiveSeconds >= 30
+                  ? formatDurationCompact(effectiveSeconds)
                   : '0m'}
               </p>
             </div>
           </div>
+
+          {/* Main-text Content Range Editor */}
+          <form
+            onSubmit={handleSaveRange}
+            className="mt-8 border-t border-[var(--border-soft)] pt-5"
+            aria-label="Main text page range"
+          >
+            <div className="flex flex-wrap items-end gap-4">
+              <div>
+                <label
+                  htmlFor="content-range-start"
+                  className="editorial-label block text-[var(--foreground-secondary)]"
+                >
+                  First page of main text
+                </label>
+                <input
+                  id="content-range-start"
+                  type="number"
+                  min={1}
+                  max={book.totalPages}
+                  value={rangeStartDraft}
+                  onChange={(e) => {
+                    setRangeStartDraft(e.target.value);
+                    if (rangeError) setRangeError(null);
+                  }}
+                  className="mt-1.5 h-10 w-28 border border-[var(--border)] bg-[var(--paper)] px-3 text-sm tabular-nums text-[var(--foreground)]"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="content-range-end"
+                  className="editorial-label block text-[var(--foreground-secondary)]"
+                >
+                  Last page of main text
+                </label>
+                <input
+                  id="content-range-end"
+                  type="number"
+                  min={1}
+                  max={book.totalPages}
+                  value={rangeEndDraft}
+                  onChange={(e) => {
+                    setRangeEndDraft(e.target.value);
+                    if (rangeError) setRangeError(null);
+                  }}
+                  className="mt-1.5 h-10 w-28 border border-[var(--border)] bg-[var(--paper)] px-3 text-sm tabular-nums text-[var(--foreground)]"
+                />
+              </div>
+
+              <Button type="submit" variant="secondary" className="h-10">
+                SAVE RANGE
+              </Button>
+
+              <p className="editorial-label tabular-nums text-[var(--foreground-secondary)]">
+                {readStats.readPages} OF {readStats.contentPages} MAIN-TEXT PAGES READ
+                {progress.round > 1 ? ` · ROUND ${progress.round}` : ''}
+              </p>
+            </div>
+
+            {rangeError && (
+              <p role="alert" className="mt-2 text-xs text-[#8B3835]">
+                {rangeError}
+              </p>
+            )}
+          </form>
         </section>
 
         {/* Quiet Book Management Strip */}
@@ -463,10 +622,10 @@ export function BookDetailPage() {
                 <button
                   key={item.id}
                   type="button"
-                  aria-pressed={book.status === item.id}
+                  aria-pressed={derivedStatus === item.id}
                   onClick={() => void setBookStatus(book.id, item.id)}
                   className={`editorial-chip h-9 border px-3 text-[10px] font-medium uppercase tracking-[0.12em] cursor-pointer ${
-                    book.status === item.id
+                    derivedStatus === item.id
                       ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--surface)]'
                       : 'border-[var(--border)] bg-[var(--surface)] text-[var(--foreground-secondary)] hover:border-[var(--foreground)] hover:text-[var(--foreground)]'
                   }`}
@@ -475,14 +634,64 @@ export function BookDetailPage() {
                 </button>
               ))}
             </div>
-            {book.status !== 'completed' && (
+
+            {derivedStatus !== 'completed' ? (
+              <div className="relative" ref={finishMenuRef}>
+                <button
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={finishMenuOpen}
+                  onClick={() => setFinishMenuOpen((open) => !open)}
+                  className="ml-2 inline-flex h-9 items-center gap-1.5 border border-[var(--border-strong)] bg-[var(--surface)] px-3 editorial-label text-[var(--foreground)] hover:bg-[var(--surface-secondary)] cursor-pointer transition-colors"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  MARK AS FINISHED
+                  <ChevronDown className="h-3 w-3" />
+                </button>
+
+                {finishMenuOpen && (
+                  <div
+                    role="menu"
+                    aria-label="Mark as finished options"
+                    className="absolute left-2 bottom-full mb-2 z-20 min-w-[210px] border border-[var(--border)] bg-[var(--surface)] py-1 shadow-lg"
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setFinishMenuOpen(false);
+                        setConfirmWeakCoverage(null);
+                        setFinishPromptOpen(true);
+                      }}
+                      className="flex w-full items-center px-3.5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.11em] text-[var(--foreground)] hover:bg-[var(--surface-secondary)] cursor-pointer"
+                    >
+                      I FINISHED IT HERE
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setFinishMenuOpen(false);
+                        void handleFinishChoice('elsewhere');
+                      }}
+                      className="flex w-full items-center px-3.5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.11em] text-[var(--foreground)] hover:bg-[var(--surface-secondary)] cursor-pointer"
+                    >
+                      I READ IT ELSEWHERE
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
               <button
                 type="button"
-                onClick={() => void markCompleted(book.id)}
-                className="ml-2 inline-flex items-center gap-1.5 editorial-label text-[var(--foreground-secondary)] hover:text-[var(--foreground)] underline underline-offset-4 cursor-pointer transition-colors"
+                onClick={async () => {
+                  await readBookAgain(book.id);
+                  showBanner(`Started round ${progress.round + 1} for "${book.title}".`);
+                }}
+                className="ml-2 inline-flex h-9 items-center gap-1.5 border border-[var(--border-strong)] bg-[var(--surface)] px-3 editorial-label text-[var(--foreground)] hover:bg-[var(--surface-secondary)] cursor-pointer transition-colors"
               >
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                MARK AS COMPLETED
+                <RotateCcw className="h-3.5 w-3.5" />
+                READ AGAIN
               </button>
             )}
           </div>
@@ -522,6 +731,24 @@ export function BookDetailPage() {
           book={book}
           open={editOpen}
           onClose={() => setEditOpen(false)}
+        />
+
+        <FinishPrompt
+          open={finishPromptOpen}
+          bookTitle={book.title}
+          progress={progress}
+          reason={null}
+          confirmWeakCoverage={confirmWeakCoverage}
+          onChoose={(choice) => void handleFinishChoice(choice)}
+          onGoToUnread={(page) => {
+            setFinishPromptOpen(false);
+            setConfirmWeakCoverage(null);
+            navigate(`/read/${book.id}?page=${page}`);
+          }}
+          onDismiss={() => {
+            setFinishPromptOpen(false);
+            setConfirmWeakCoverage(null);
+          }}
         />
       </main>
     </PageTransition>

@@ -3,7 +3,6 @@ import {
   ArrowUpRight,
   BarChart3,
   BookOpen,
-  Code2,
   Globe,
   Library,
   Mail,
@@ -68,41 +67,31 @@ export function Footer() {
             </ul>
           </div>
 
-          {/* Developer Details */}
-          <div className="border-t border-[var(--border-soft)] pt-6 md:border-t-0 md:border-l md:pl-8 md:pt-0">
-            <div className="flex items-center gap-2">
-              <Code2 className="h-3.5 w-3.5 text-[var(--accent-hover)]" />
-              <p className="editorial-label text-[var(--foreground-secondary)]">
-                DEVELOPER DETAILS
-              </p>
-            </div>
-            <p className="mt-2.5 font-display text-2xl font-medium leading-tight text-[var(--foreground)]">
+          {/* Developer Details (Minimal) */}
+          <div className="border-t border-[var(--border-soft)] pt-5 md:border-t-0 md:border-l md:pl-8 md:pt-0">
+            <p className="editorial-label text-[var(--foreground-secondary)]">
+              DEVELOPER
+            </p>
+            <p className="mt-2 text-sm font-medium text-[var(--foreground)]">
               Sarukhan Muthuraman
             </p>
-            <p className="mt-1 text-xs text-[var(--foreground-secondary)]">
-              Design &amp; Engineering · Local-First Web Studio
-            </p>
-
-            <div className="mt-4 flex flex-col gap-2">
+            <div className="mt-2 flex flex-col gap-1.5 text-xs text-[var(--foreground-secondary)]">
               <a
                 href="https://sarukhanmuthuraman.online"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="group inline-flex w-fit items-center gap-2 border border-[var(--border-strong)] bg-[var(--background)] px-3 py-2 text-xs font-medium tracking-[0.04em] text-[var(--foreground)] transition-all duration-150 hover:-translate-y-0.5 hover:border-[var(--foreground)] hover:bg-[var(--foreground)] hover:text-[var(--surface)]"
+                className="group inline-flex w-fit items-center gap-1.5 text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors duration-150"
               >
-                <Globe className="h-3.5 w-3.5 transition-transform duration-150 group-hover:rotate-12" />
-                <span>sarukhanmuthuraman.online</span>
-                <ArrowUpRight className="h-3.5 w-3.5 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+                <Globe className="h-3 w-3" />
+                <span className="editorial-link-underline">sarukhanmuthuraman.online</span>
+                <ArrowUpRight className="h-3 w-3 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
               </a>
-
               <a
-                href="mailto:sarukhanmuthuraman@gmail.com"
-                className="group inline-flex w-fit items-center gap-2 py-1 text-xs text-[var(--foreground-secondary)] hover:text-[var(--foreground)] transition-colors duration-150"
+                href="mailto:s.saru7072@gmail.com"
+                className="group inline-flex w-fit items-center gap-1.5 hover:text-[var(--foreground)] transition-colors duration-150"
               >
-                <Mail className="h-3.5 w-3.5 transition-transform duration-150 group-hover:scale-110 group-hover:text-[var(--accent-hover)]" />
-                <span className="editorial-link-underline">
-                  sarukhanmuthuraman@gmail.com
-                </span>
+                <Mail className="h-3 w-3" />
+                <span className="editorial-link-underline">s.saru7072@gmail.com</span>
               </a>
             </div>
           </div>
@@ -110,15 +99,13 @@ export function Footer() {
 
         <div className="mt-8 flex flex-wrap items-center justify-between gap-4 border-t border-[var(--border-soft)] pt-5 text-[11px] uppercase tracking-[0.12em] text-[var(--foreground-secondary)]">
           <span>
-            &copy; {currentYear} THE GROWTH SHELF · BUILT BY SARUKHAN MUTHURAMAN
+            &copy; {currentYear} THE GROWTH SHELF · SARUKHAN MUTHURAMAN
           </span>
           <a
-            href="https://sarukhanmuthuraman.online"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="mailto:s.saru7072@gmail.com"
             className="editorial-link-underline hover:text-[var(--foreground)] transition-colors"
           >
-            SARUKHANMUTHURAMAN.ONLINE
+            S.SARU7072@GMAIL.COM
           </a>
         </div>
       </div>

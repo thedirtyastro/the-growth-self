@@ -1,5 +1,31 @@
 export type BookStatus = 'not-started' | 'ongoing' | 'completed';
 
+export type CompletionType = 'read' | 'skimmed' | 'manual';
+
+export interface CompletionRecord {
+  round: number;
+  type: CompletionType;
+  completedAt: string;
+  readPages: number;
+  skimmedPages: number;
+  activeMs: number;
+}
+
+export interface Progress {
+  bookId: string;
+  round: number;
+  position: number;
+  contentStart: number;
+  contentEnd: number;
+  rangeDetected: boolean;
+  pageStates: number[];
+  dwellMs: number[];
+  completionType?: CompletionType;
+  completedAt?: string;
+  completions: CompletionRecord[];
+  promptDismissedAt?: number;
+}
+
 export type HighlightColor = 'yellow' | 'pink' | 'blue' | 'green';
 
 export interface Rect {
@@ -17,8 +43,9 @@ export interface Book {
   tags?: string[];
   totalPages: number;
   currentPage: number;
-  furthestPage: number;
   status: BookStatus;
+  completionType?: CompletionType;
+  pageWordCounts?: (number | null)[];
   pdfFileId?: string;
   coverDataUrl?: string;
   coverColor: string;

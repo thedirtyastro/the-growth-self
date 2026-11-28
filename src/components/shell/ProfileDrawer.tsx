@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import {
   ArrowUpRight,
   BookOpen,
-  Code2,
   Globe,
   Mail,
   Plus,
@@ -222,41 +221,35 @@ export function ProfileDrawer() {
           </div>
         </div>
 
-        <div className="mt-8 border-t border-[var(--border-soft)] pt-5 space-y-3">
+        <div className="mt-8 border-t border-[var(--border-soft)] pt-5 space-y-2.5">
           <div className="flex items-center gap-2 text-[var(--foreground-secondary)]">
-            <BookOpen className="h-3.5 w-3.5" />
+            <BookOpen className="h-3.5 w-3.5 shrink-0" />
             <p className="text-xs leading-relaxed">
               All PDFs and reading data stay privately in your browser&apos;s IndexedDB.
             </p>
           </div>
 
-          <div className="border border-[var(--border-soft)] bg-[var(--background)] p-3.5 space-y-2">
-            <div className="flex items-center gap-1.5">
-              <Code2 className="h-3.5 w-3.5 text-[var(--accent-hover)]" />
-              <span className="editorial-label text-[var(--foreground-secondary)]">
-                DEVELOPED BY
-              </span>
-            </div>
-            <p className="font-display text-lg font-medium text-[var(--foreground)]">
-              Sarukhan Muthuraman
+          <div className="pt-1 text-[11px] text-[var(--foreground-secondary)] space-y-1">
+            <p className="font-medium text-[var(--foreground)]">
+              Developed by Sarukhan Muthuraman
             </p>
-            <div className="flex flex-wrap items-center gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <a
                 href="https://sarukhanmuthuraman.online"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="group inline-flex items-center gap-1 font-medium text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors"
+                className="group inline-flex items-center gap-1 hover:text-[var(--foreground)] transition-colors"
               >
                 <Globe className="h-3 w-3" />
                 <span className="editorial-link-underline">sarukhanmuthuraman.online</span>
-                <ArrowUpRight className="h-3 w-3 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+                <ArrowUpRight className="h-3 w-3" />
               </a>
               <a
-                href="mailto:sarukhanmuthuraman@gmail.com"
-                className="inline-flex items-center gap-1 text-[var(--foreground-secondary)] hover:text-[var(--foreground)] transition-colors"
+                href="mailto:s.saru7072@gmail.com"
+                className="inline-flex items-center gap-1 hover:text-[var(--foreground)] transition-colors"
               >
                 <Mail className="h-3 w-3" />
-                <span>Email</span>
+                <span className="editorial-link-underline">s.saru7072@gmail.com</span>
               </a>
             </div>
           </div>

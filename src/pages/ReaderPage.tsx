@@ -9,18 +9,22 @@ import {
 } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import type { Highlight, HighlightColor, Rect } from '../types/models';
+import type { Highlight, HighlightColor, Progress, Rect } from '../types/models';
 import { getPdfBlob } from '../lib/db';
-import { openPdfDocument } from '../lib/pdf/loader';
+import { extractPageWordCount, openPdfDocument } from '../lib/pdf/loader';
 import { PdfRenderQueue } from '../lib/pdf/renderQueue';
 import {
-  changeTrackerPage,
-  createSessionTracker,
-  markTrackerActivity,
-  snapshotSession,
-  tickSessionTracker,
-  type SessionTrackerState,
-} from '../lib/domain/sessions';
+  CFG,
+  DwellTracker,
+  applyContentRange,
+  createInitialProgress,
+  detectContentRange,
+  isJump,
+  promptReason,
+  type FinishChoice,
+  type NavSource,
+  type PromptReason,
+} from '../lib/domain/reading';
 import { playPageTurnSound } from '../lib/audio';
 import { useLibraryStore } from '../store/library';
 import { useSettingsStore } from '../store/settings';
@@ -33,6 +37,8 @@ import { ReaderControls } from '../components/reader/ReaderControls';
 import { SelectionToolbar } from '../components/reader/SelectionToolbar';
 import { NotesPanel } from '../components/reader/NotesPanel';
 import { SettingsPanel } from '../components/reader/SettingsPanel';
+import { JumpChip } from '../components/reader/JumpChip';
+import { FinishPrompt } from '../components/reader/FinishPrompt';
 
 const LazyBookScene = lazy(() =>
   import('../components/reader/BookScene').then((m) => ({ default: m.BookScene }))
@@ -54,16 +60,21 @@ export function ReaderPage() {
   const navigate = useNavigate();
 
   const books = useLibraryStore((s) => s.books);
+  const progressByBook = useLibraryStore((s) => s.progressByBook);
   const hydrated = useLibraryStore((s) => s.hydrated);
   const highlights = useLibraryStore((s) => s.highlights);
   const bookmarks = useLibraryStore((s) => s.bookmarks);
   const journal = useLibraryStore((s) => s.journal);
-  const recordReadingProgress = useLibraryStore((s) => s.recordReadingProgress);
+
+  const syncPdfMetadata = useLibraryStore((s) => s.syncPdfMetadata);
+  const updateBookWordCounts = useLibraryStore((s) => s.updateBookWordCounts);
+  const commitVisitAction = useLibraryStore((s) => s.commitVisitAction);
+  const setContentRange = useLibraryStore((s) => s.setContentRange);
+  const applyFinishChoice = useLibraryStore((s) => s.applyFinishChoice);
   const addHighlight = useLibraryStore((s) => s.addHighlight);
   const updateHighlight = useLibraryStore((s) => s.updateHighlight);
   const removeHighlight = useLibraryStore((s) => s.removeHighlight);
   const toggleBookmark = useLibraryStore((s) => s.toggleBookmark);
-  const upsertSession = useLibraryStore((s) => s.upsertSession);
   const removeBook = useLibraryStore((s) => s.removeBook);
 
   const settings = useSettingsStore((s) => s.settings);
@@ -90,6 +101,10 @@ export function ReaderPage() {
   } = useReaderStore();
 
   const book = books.find((b) => b.id === id);
+  const progress: Progress | undefined = book
+    ? progressByBook[book.id] ??
+      createInitialProgress(book.id, book.totalPages, book.status, book.completedAt)
+    : undefined;
 
   const [loadingPdf, setLoadingPdf] = useState(true);
   const [loadProgress, setLoadProgress] = useState(12);
@@ -101,14 +116,35 @@ export function ReaderPage() {
   const [selection, setSelection] = useState<ActiveSelectionState | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [closing3d, setClosing3d] = useState(false);
+  const [isSettled, setIsSettled] = useState(true);
+  const [jumpFromPage, setJumpFromPage] = useState<number | null>(null);
+  const [finishPromptState, setFinishPromptState] = useState<{
+    open: boolean;
+    reason: PromptReason;
+    confirmWeakCoverage: number | null;
+    pendingClose: boolean;
+  }>({
+    open: false,
+    reason: null,
+    confirmWeakCoverage: null,
+    pendingClose: false,
+  });
+
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 1280
   );
 
   const pdfDocRef = useRef<PDFDocumentProxy | null>(null);
   const queueRef = useRef<PdfRenderQueue | null>(null);
-  const trackerRef = useRef<SessionTrackerState | null>(null);
+  const dwellTrackerRef = useRef<DwellTracker | null>(null);
+  const wordCountsRef = useRef<(number | null)[]>([]);
+  const wordCountsDirtyRef = useRef(false);
+  const pendingJumpRef = useRef(false);
+  const jumpChipTimerRef = useRef<number | null>(null);
   const idleTimerRef = useRef<number | null>(null);
+  const lastInputSentRef = useRef(0);
+  const finishPromptOpenRef = useRef(false);
+  finishPromptOpenRef.current = finishPromptState.open;
 
   // Responsive layout resolution
   useEffect(() => {
@@ -130,7 +166,68 @@ export function ReaderPage() {
     webglSupported &&
     !webglFailed;
 
-  // Initialize reader page state & load PDF from IndexedDB
+  const visiblePages = useMemo(() => {
+    if (totalPages < 1) return [1];
+    if (!isSpread) return [Math.max(1, Math.min(currentPage, totalPages))];
+    const left = currentPage % 2 === 0 ? Math.max(1, currentPage - 1) : currentPage;
+    const right = left + 1 <= totalPages ? left + 1 : null;
+    return right ? [left, right] : [left];
+  }, [currentPage, totalPages, isSpread]);
+
+  const clearJumpChip = useCallback(() => {
+    if (jumpChipTimerRef.current) {
+      clearTimeout(jumpChipTimerRef.current);
+      jumpChipTimerRef.current = null;
+    }
+    setJumpFromPage(null);
+  }, []);
+
+  const showJumpChip = useCallback(
+    (fromPage: number) => {
+      if (jumpChipTimerRef.current) clearTimeout(jumpChipTimerRef.current);
+      setJumpFromPage(fromPage);
+      jumpChipTimerRef.current = window.setTimeout(() => {
+        setJumpFromPage(null);
+        jumpChipTimerRef.current = null;
+      }, CFG.UNDO_CHIP_MS);
+    },
+    []
+  );
+
+  // Helper to commit active dwell safely
+  const commitCurrentDwell = useCallback(
+    async (now = Date.now()): Promise<Progress | undefined> => {
+      if (!book) return undefined;
+      const tracker = dwellTrackerRef.current;
+      if (!tracker) return useLibraryStore.getState().progressByBook[book.id];
+      const visit = tracker.commit(now);
+      if (visit && visit.activeMs > 0) {
+        return commitVisitAction(book.id, visit, wordCountsRef.current, now);
+      }
+      return useLibraryStore.getState().progressByBook[book.id];
+    },
+    [book, commitVisitAction]
+  );
+
+  // Lazy word-count extraction for visible pages + caching onto Book
+  const ensureWordCountsForPages = useCallback(
+    async (pdf: PDFDocumentProxy, pages: number[]) => {
+      let updated = false;
+      for (const pg of pages) {
+        if (pg >= 1 && pg <= pdf.numPages && wordCountsRef.current[pg] === undefined) {
+          const count = await extractPageWordCount(pdf, pg);
+          wordCountsRef.current[pg] = count;
+          updated = true;
+        }
+      }
+      if (updated) {
+        wordCountsDirtyRef.current = true;
+      }
+    },
+    []
+  );
+
+  // Initialize reader page state, open PDF, detect content range, and check catch-up prompt
   useEffect(() => {
     if (!hydrated) return;
     if (!book) {
@@ -139,19 +236,25 @@ export function ReaderPage() {
       return;
     }
 
+    const storeProgress = useLibraryStore.getState().progressByBook[book.id];
+    const resumePage = storeProgress?.position ?? Math.max(1, book.currentPage || 1);
     const queryPage = Number(searchParams.get('page'));
-    const startPage =
-      Number.isFinite(queryPage) && queryPage >= 1
-        ? Math.min(queryPage, book.totalPages)
-        : Math.max(1, book.currentPage || 1);
+    const hasQueryPage = Number.isFinite(queryPage) && queryPage >= 1;
+    const startPage = hasQueryPage
+      ? Math.min(queryPage, book.totalPages)
+      : Math.max(1, resumePage);
 
     initReader(book.id, startPage, book.totalPages);
+    wordCountsRef.current = book.pageWordCounts ? [...book.pageWordCounts] : [];
+    wordCountsDirtyRef.current = false;
 
     let cancelled = false;
     setLoadingPdf(true);
     setLoadError(false);
     setSlowLoadHint(false);
     setLoadProgress(15);
+    setIsSettled(true);
+    clearJumpChip();
 
     const slowTimer = window.setTimeout(() => {
       if (!cancelled) setSlowLoadHint(true);
@@ -184,6 +287,25 @@ export function ReaderPage() {
         const actualTotal = Math.max(1, pdf.numPages);
         const clampedStart = Math.max(1, Math.min(startPage, actualTotal));
 
+        let syncedProgress = await syncPdfMetadata(book.id, actualTotal);
+        if (!syncedProgress) {
+          syncedProgress = createInitialProgress(book.id, actualTotal, book.status, book.completedAt);
+        }
+
+        // First-open content range detection (front/back matter)
+        if (!syncedProgress.rangeDetected) {
+          const detected = await detectContentRange(pdf);
+          if (!cancelled) {
+            const updated = await setContentRange(book.id, detected.start, detected.end, true);
+            if (updated) syncedProgress = updated;
+          }
+        }
+
+        // Pre-warm word count for opening spread
+        void ensureWordCountsForPages(pdf, [clampedStart, clampedStart + 1]);
+
+        if (cancelled) return;
+
         const queue = new PdfRenderQueue(pdf, 16, 2048);
         queueRef.current = queue;
         setRenderQueue(queue);
@@ -192,7 +314,25 @@ export function ReaderPage() {
         setLoadProgress(100);
         setLoadingPdf(false);
 
-        await recordReadingProgress(book.id, clampedStart, actualTotal);
+        if (hasQueryPage && isJump(resumePage, clampedStart, 'toc')) {
+          pendingJumpRef.current = true;
+          showJumpChip(resumePage);
+        }
+
+        // Check catch-up finish prompt on open (>= 90% coverage, not dismissed recently)
+        const reason = promptReason(syncedProgress, {
+          onContentEnd: false,
+          leaving: null,
+          opening: true,
+        });
+        if (reason) {
+          setFinishPromptState({
+            open: true,
+            reason,
+            confirmWeakCoverage: null,
+            pendingClose: false,
+          });
+        }
       } catch (err) {
         console.error('Failed to open PDF book:', err);
         if (!cancelled) {
@@ -207,6 +347,10 @@ export function ReaderPage() {
     return () => {
       cancelled = true;
       clearTimeout(slowTimer);
+      clearJumpChip();
+      if (wordCountsDirtyRef.current) {
+        void updateBookWordCounts(book.id, wordCountsRef.current);
+      }
       queueRef.current?.dispose();
       queueRef.current = null;
       setRenderQueue(null);
@@ -218,69 +362,110 @@ export function ReaderPage() {
     };
   }, [hydrated, book?.id, retryCount]);
 
-  // Reading session tracker (ticks every 1s, persists every 30s and on close/unmount)
+  // DwellTracker lifecycle: one tracker per open book, commits every 30s, visibilitychange, pagehide, unmount
   useEffect(() => {
     if (!book || loadingPdf || loadError) return;
 
-    const sessionId = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    trackerRef.current = createSessionTracker(sessionId, book.id, currentPage);
+    const tracker = new DwellTracker(document.visibilityState === 'visible');
+    dwellTrackerRef.current = tracker;
 
-    const tickInterval = window.setInterval(() => {
-      if (!trackerRef.current) return;
-      trackerRef.current = tickSessionTracker(
-        trackerRef.current,
-        document.visibilityState === 'visible'
-      );
-    }, 1000);
+    const onInputThrottled = () => {
+      const now = Date.now();
+      if (now - lastInputSentRef.current >= 1000) {
+        lastInputSentRef.current = now;
+        dwellTrackerRef.current?.input(now);
+      }
+    };
 
-    const persistInterval = window.setInterval(() => {
-      if (!trackerRef.current) return;
-      const snap = snapshotSession(trackerRef.current);
-      if (snap.durationSeconds >= 5) {
-        void upsertSession(snap);
+    const onVisibilityChange = () => {
+      const now = Date.now();
+      const visible = document.visibilityState === 'visible';
+      if (!visible) {
+        void commitCurrentDwell(now);
+      }
+      dwellTrackerRef.current?.setVisible(visible, now);
+    };
+
+    const onPageHide = () => {
+      const now = Date.now();
+      void commitCurrentDwell(now);
+      if (wordCountsDirtyRef.current) {
+        wordCountsDirtyRef.current = false;
+        void updateBookWordCounts(book.id, wordCountsRef.current);
+      }
+    };
+
+    const commitTimer = window.setInterval(() => {
+      const now = Date.now();
+      void commitCurrentDwell(now);
+      if (wordCountsDirtyRef.current) {
+        wordCountsDirtyRef.current = false;
+        void updateBookWordCounts(book.id, wordCountsRef.current);
       }
     }, 30_000);
 
-    const onActivity = () => {
-      if (trackerRef.current) {
-        trackerRef.current = markTrackerActivity(trackerRef.current);
-      }
-    };
-
-    const onVisibility = () => {
-      if (trackerRef.current) {
-        trackerRef.current = tickSessionTracker(
-          trackerRef.current,
-          document.visibilityState === 'visible'
-        );
-        if (document.visibilityState === 'hidden') {
-          const snap = snapshotSession(trackerRef.current);
-          if (snap.durationSeconds >= 5) {
-            void upsertSession(snap);
-          }
-        }
-      }
-    };
-
-    window.addEventListener('pointerdown', onActivity);
-    window.addEventListener('keydown', onActivity);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pointerdown', onInputThrottled);
+    window.addEventListener('keydown', onInputThrottled);
+    window.addEventListener('wheel', onInputThrottled, { passive: true });
+    window.addEventListener('touchstart', onInputThrottled, { passive: true });
+    window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
-      clearInterval(tickInterval);
-      clearInterval(persistInterval);
-      window.removeEventListener('pointerdown', onActivity);
-      window.removeEventListener('keydown', onActivity);
-      document.removeEventListener('visibilitychange', onVisibility);
-      if (trackerRef.current) {
-        const finalSnap = snapshotSession(trackerRef.current);
-        if (finalSnap.durationSeconds >= 3) {
-          void upsertSession(finalSnap);
-        }
-        trackerRef.current = null;
+      clearInterval(commitTimer);
+      window.removeEventListener('pointerdown', onInputThrottled);
+      window.removeEventListener('keydown', onInputThrottled);
+      window.removeEventListener('wheel', onInputThrottled);
+      window.removeEventListener('touchstart', onInputThrottled);
+      window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+
+      const finalNow = Date.now();
+      const ended = dwellTrackerRef.current?.show([], finalNow) ?? null;
+      if (ended && ended.activeMs > 0) {
+        void commitVisitAction(book.id, ended, wordCountsRef.current, finalNow);
       }
+      if (wordCountsDirtyRef.current) {
+        wordCountsDirtyRef.current = false;
+        void updateBookWordCounts(book.id, wordCountsRef.current);
+      }
+      dwellTrackerRef.current = null;
     };
-  }, [book?.id, loadingPdf, loadError]);
+  }, [book?.id, loadingPdf, loadError, commitCurrentDwell, commitVisitAction, updateBookWordCounts]);
+
+  // Feed settled pages into DwellTracker.show() ONLY when settled (never mid-drag/mid-animation)
+  useEffect(() => {
+    if (!book || loadingPdf || loadError || !dwellTrackerRef.current) return;
+    const now = Date.now();
+
+    if (!isSettled || finishPromptState.open) {
+      const ended = dwellTrackerRef.current.show([], now);
+      if (ended && ended.activeMs > 0) {
+        void commitVisitAction(book.id, ended, wordCountsRef.current, now);
+      }
+      return;
+    }
+
+    if (pdfDocRef.current) {
+      void ensureWordCountsForPages(pdfDocRef.current, visiblePages);
+    }
+
+    const jumped = pendingJumpRef.current;
+    pendingJumpRef.current = false;
+    const ended = dwellTrackerRef.current.show(visiblePages, now, jumped);
+    if (ended && ended.activeMs > 0) {
+      void commitVisitAction(book.id, ended, wordCountsRef.current, now);
+    }
+  }, [
+    book?.id,
+    loadingPdf,
+    loadError,
+    isSettled,
+    finishPromptState.open,
+    visiblePages,
+    commitVisitAction,
+    ensureWordCountsForPages,
+  ]);
 
   // Auto-hide controls after 2.5s of inactivity
   const bumpControls = useCallback(() => {
@@ -288,7 +473,7 @@ export function ReaderPage() {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     idleTimerRef.current = window.setTimeout(() => {
       const state = useReaderStore.getState();
-      if (!state.notesOpen && !state.settingsOpen) {
+      if (!state.notesOpen && !state.settingsOpen && !finishPromptOpenRef.current) {
         state.setControlsVisible(false);
       }
     }, 2500);
@@ -311,16 +496,28 @@ export function ReaderPage() {
   }, [bumpControls, loadingPdf, loadError]);
 
   useEffect(() => {
-    if (notesOpen || settingsOpen || selection) {
+    if (notesOpen || settingsOpen || selection || finishPromptState.open) {
       setControlsVisible(true);
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     }
-  }, [notesOpen, settingsOpen, selection, setControlsVisible]);
+  }, [notesOpen, settingsOpen, selection, finishPromptState.open, setControlsVisible]);
 
   const navigateToPage = useCallback(
-    (nextPage: number) => {
+    (nextPage: number, source: NavSource = 'turn') => {
       if (!book) return;
       const clamped = Math.max(1, Math.min(nextPage, totalPages));
+      const latestProgress = useLibraryStore.getState().progressByBook[book.id] ?? progress;
+      const currentPos = latestProgress?.position ?? currentPage;
+
+      const jumped = isJump(currentPage, clamped, source);
+      if (jumped) {
+        pendingJumpRef.current = true;
+        showJumpChip(currentPos);
+      } else if (source === 'turn') {
+        pendingJumpRef.current = false;
+        clearJumpChip();
+      }
+
       setSelection(null);
       window.getSelection()?.removeAllRanges();
       setPage(clamped);
@@ -328,13 +525,27 @@ export function ReaderPage() {
       if (settings.sound) {
         playPageTurnSound();
       }
-      if (trackerRef.current) {
-        trackerRef.current = changeTrackerPage(trackerRef.current, clamped);
-      }
-      void recordReadingProgress(book.id, clamped, totalPages);
     },
-    [book, totalPages, setPage, settings.sound, recordReadingProgress]
+    [book, totalPages, progress, currentPage, setPage, settings.sound, showJumpChip, clearJumpChip]
   );
+
+  const handleGoBackFromJump = useCallback(() => {
+    if (jumpFromPage === null) return;
+    const target = jumpFromPage;
+    pendingJumpRef.current = false;
+    clearJumpChip();
+    setSelection(null);
+    window.getSelection()?.removeAllRanges();
+    setPage(Math.max(1, Math.min(target, totalPages)));
+  }, [jumpFromPage, clearJumpChip, setPage, totalPages]);
+
+  const isOnContentEnd = useMemo(() => {
+    if (!progress) return false;
+    return (
+      visiblePages.includes(progress.contentEnd) ||
+      visiblePages.some((p) => p >= progress.contentEnd)
+    );
+  }, [progress, visiblePages]);
 
   const handlePrevPage = useCallback(() => {
     const step = isSpread ? 2 : 1;
@@ -342,31 +553,63 @@ export function ReaderPage() {
     if (use3dEngine && settings.animation === 'full') {
       window.dispatchEvent(new CustomEvent('growth-shelf-3d-turn', { detail: { dir: -1 } }));
     } else {
-      navigateToPage(Math.max(1, currentPage - step));
+      navigateToPage(Math.max(1, currentPage - step), 'turn');
     }
   }, [currentPage, isSpread, use3dEngine, settings.animation, navigateToPage]);
 
   const handleNextPage = useCallback(() => {
     const step = isSpread ? 2 : 1;
-    if (currentPage >= totalPages) return;
+    const latestProgress = book
+      ? useLibraryStore.getState().progressByBook[book.id] ?? progress
+      : progress;
+
+    // Leaving contentEnd moving forward checks finish prompt
+    if (latestProgress && isOnContentEnd) {
+      const reason = promptReason(latestProgress, {
+        onContentEnd: true,
+        leaving: 'forward',
+        opening: false,
+      });
+      if (reason) {
+        void commitCurrentDwell(Date.now());
+        setFinishPromptState({
+          open: true,
+          reason,
+          confirmWeakCoverage: null,
+          pendingClose: false,
+        });
+        return;
+      }
+    }
+
+    const atLastSpread = isSpread
+      ? (currentPage % 2 === 0 ? currentPage : currentPage + 1) >= totalPages
+      : currentPage >= totalPages;
+    if (atLastSpread) return;
+
     if (use3dEngine && settings.animation === 'full') {
       window.dispatchEvent(new CustomEvent('growth-shelf-3d-turn', { detail: { dir: 1 } }));
     } else {
-      navigateToPage(Math.min(totalPages, currentPage + step));
+      navigateToPage(Math.min(totalPages, currentPage + step), 'turn');
     }
-  }, [currentPage, totalPages, isSpread, use3dEngine, settings.animation, navigateToPage]);
+  }, [
+    book,
+    progress,
+    isOnContentEnd,
+    isSpread,
+    currentPage,
+    totalPages,
+    use3dEngine,
+    settings.animation,
+    navigateToPage,
+    commitCurrentDwell,
+  ]);
 
   const finishClose = useCallback(() => {
-    if (trackerRef.current) {
-      const snap = snapshotSession(trackerRef.current);
-      if (snap.durationSeconds >= 3) {
-        void upsertSession(snap);
-      }
-    }
-    navigate('/');
-  }, [navigate, upsertSession]);
+    navigate(book ? `/books/${book.id}` : '/');
+  }, [navigate, book]);
 
-  const handleCloseReader = useCallback(() => {
+  const executeAnimatedClose = useCallback(() => {
     if (use3dEngine && settings.animation !== 'off') {
       setClosing3d(true);
       window.setTimeout(() => {
@@ -377,10 +620,95 @@ export function ReaderPage() {
     }
   }, [use3dEngine, settings.animation, finishClose]);
 
+  const handleCloseReader = useCallback(async () => {
+    if (!book) {
+      finishClose();
+      return;
+    }
+
+    const now = Date.now();
+    const latestProgress = (await commitCurrentDwell(now)) ??
+      useLibraryStore.getState().progressByBook[book.id] ??
+      progress;
+
+    if (latestProgress) {
+      const onEnd =
+        visiblePages.includes(latestProgress.contentEnd) ||
+        visiblePages.some((p) => p >= latestProgress.contentEnd);
+      const reason = promptReason(latestProgress, {
+        onContentEnd: onEnd,
+        leaving: 'close',
+        opening: false,
+      });
+      if (reason) {
+        setFinishPromptState({
+          open: true,
+          reason,
+          confirmWeakCoverage: null,
+          pendingClose: true,
+        });
+        return;
+      }
+    }
+
+    executeAnimatedClose();
+  }, [book, progress, visiblePages, commitCurrentDwell, executeAnimatedClose, finishClose]);
+
+  const handleFinishChoice = useCallback(
+    async (choice: FinishChoice) => {
+      if (!book) return;
+      const outcome = await applyFinishChoice(book.id, choice);
+      if (outcome?.needsConfirm) {
+        setFinishPromptState((prev) => ({
+          ...prev,
+          confirmWeakCoverage: outcome.coverage ?? 0,
+        }));
+        return;
+      }
+
+      const shouldClose = finishPromptState.pendingClose;
+      setFinishPromptState({
+        open: false,
+        reason: null,
+        confirmWeakCoverage: null,
+        pendingClose: false,
+      });
+
+      if (choice === 'read' || choice === 'anyway' || choice === 'skimmed') {
+        showBanner(
+          choice === 'skimmed'
+            ? `"${book.title}" marked as skimmed.`
+            : `"${book.title}" marked as completed.`
+        );
+      }
+
+      if (shouldClose) {
+        executeAnimatedClose();
+      }
+    },
+    [book, applyFinishChoice, finishPromptState.pendingClose, executeAnimatedClose, showBanner]
+  );
+
+  const handleDismissFinishPrompt = useCallback(async () => {
+    await handleFinishChoice('notyet');
+  }, [handleFinishChoice]);
+
+  const handleGoToUnread = useCallback(
+    (page: number) => {
+      setFinishPromptState({
+        open: false,
+        reason: null,
+        confirmWeakCoverage: null,
+        pendingClose: false,
+      });
+      navigateToPage(page, 'toc');
+    },
+    [navigateToPage]
+  );
+
   useEffect(() => {
     const onFsChange = () => {
       if (!document.fullscreenElement) {
-        // Keep state synced when user exits native fullscreen with browser Esc
         setIsFullscreen(false);
       }
     };
@@ -398,7 +726,7 @@ export function ReaderPage() {
         await document.exitFullscreen();
       }
     } catch {
-      // Browser fullscreen API may be blocked in embedded iframe; visual full-screen book mode stays active
+      // Fallback visual fullscreen remains active
     }
   }, [isFullscreen]);
 
@@ -408,11 +736,12 @@ export function ReaderPage() {
     showBanner(added ? `Bookmarked page ${currentPage}.` : `Removed bookmark on page ${currentPage}.`);
   }, [book, currentPage, toggleBookmark, showBanner]);
 
-  // Global keyboard shortcuts (Section 8.5)
+  // Global keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (finishPromptState.open) return;
 
       if (e.key === 'ArrowRight') {
         e.preventDefault();
@@ -439,13 +768,14 @@ export function ReaderPage() {
         } else if (isFullscreen) {
           void handleToggleFullscreen();
         } else {
-          handleCloseReader();
+          void handleCloseReader();
         }
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    finishPromptState.open,
     handleNextPage,
     handlePrevPage,
     handleToggleBookmark,
@@ -566,7 +896,7 @@ export function ReaderPage() {
         </div>
       )}
 
-      {/* Error State (Section 7) */}
+      {/* Error State */}
       {!loadingPdf && loadError && (
         <div className="flex min-h-screen flex-col items-center justify-center px-6">
           <div className="w-full max-w-[440px] border border-[var(--border)] bg-[var(--surface)] p-8 text-center">
@@ -617,6 +947,7 @@ export function ReaderPage() {
                   onTextLayerDetected={setHasTextLayer}
                   onPrevPage={handlePrevPage}
                   onNextPage={handleNextPage}
+                  onSettledChange={setIsSettled}
                   onTextSelected={(payload) => setSelection({ ...payload })}
                   onAreaSelected={(payload) =>
                     setSelection({
@@ -649,9 +980,10 @@ export function ReaderPage() {
                 areaHighlightMode={areaHighlightMode}
                 closingSignal={closing3d}
                 onCloseComplete={finishClose}
-                onPageChangeRequest={navigateToPage}
+                onPageChangeRequest={(next) => navigateToPage(next, 'turn')}
                 onTextLayerDetected={setHasTextLayer}
                 onWebglFailure={() => setWebglFailed(true)}
+                onSettledChange={setIsSettled}
                 onTextSelected={(payload) => setSelection({ ...payload })}
                 onAreaSelected={(payload) =>
                   setSelection({
@@ -686,6 +1018,7 @@ export function ReaderPage() {
               onTextLayerDetected={setHasTextLayer}
               onPrevPage={handlePrevPage}
               onNextPage={handleNextPage}
+              onSettledChange={setIsSettled}
               onTextSelected={(payload) => setSelection({ ...payload })}
               onAreaSelected={(payload) =>
                 setSelection({
@@ -715,6 +1048,11 @@ export function ReaderPage() {
             </div>
           )}
 
+          <JumpChip
+            fromPage={jumpFromPage}
+            onGoBack={handleGoBackFromJump}
+          />
+
           <ReaderControls
             visible={controlsVisible}
             currentPage={currentPage}
@@ -724,14 +1062,17 @@ export function ReaderPage() {
             isFullscreen={isFullscreen}
             hasTextLayer={hasTextLayer}
             areaHighlightMode={areaHighlightMode}
+            onContentEnd={isOnContentEnd}
+            isCompleted={Boolean(progress?.completionType)}
             onToggleAreaHighlight={() => setAreaHighlightMode(!areaHighlightMode)}
             onToggleNotes={() => setNotesOpen(!notesOpen)}
             onToggleBookmark={() => void handleToggleBookmark()}
             onToggleSettings={() => setSettingsOpen(!settingsOpen)}
             onToggleFullscreen={() => void handleToggleFullscreen()}
-            onClose={handleCloseReader}
+            onClose={() => void handleCloseReader()}
             onPrevPage={handlePrevPage}
             onNextPage={handleNextPage}
+            onJumpToPage={(p) => navigateToPage(p, 'field')}
           />
 
           {selection && (
@@ -757,7 +1098,7 @@ export function ReaderPage() {
             highlights={bookHighlights}
             journalEntries={bookJournal}
             onNavigatePage={(p) => {
-              navigateToPage(p);
+              navigateToPage(p, 'toc');
             }}
             onClose={() => setNotesOpen(false)}
           />
@@ -766,6 +1107,24 @@ export function ReaderPage() {
             open={settingsOpen}
             onClose={() => setSettingsOpen(false)}
           />
+
+          {progress && (
+            <FinishPrompt
+              open={finishPromptState.open}
+              bookTitle={book.title}
+              progress={applyContentRange(
+                progress,
+                progress.contentStart,
+                Math.min(progress.contentEnd, totalPages),
+                progress.rangeDetected
+              )}
+              reason={finishPromptState.reason}
+              confirmWeakCoverage={finishPromptState.confirmWeakCoverage}
+              onChoose={(c) => void handleFinishChoice(c)}
+              onGoToUnread={handleGoToUnread}
+              onDismiss={() => void handleDismissFinishPrompt()}
+            />
+          )}
         </>
       )}
     </div>

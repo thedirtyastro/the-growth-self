@@ -68,22 +68,22 @@ export function computeBookProgress(currentPage: number, totalPages: number): nu
   return Math.round((clamped / totalPages) * 100);
 }
 
-export function computeOverallProgress(books: Pick<Book, 'furthestPage' | 'totalPages' | 'status'>[]): number {
+export function computeOverallProgress(books: Pick<Book, 'currentPage' | 'totalPages' | 'status'>[]): number {
   if (books.length === 0) return 0;
   let total = 0;
-  let furthest = 0;
+  let read = 0;
   for (const book of books) {
     if (book.totalPages > 0) {
       total += book.totalPages;
-      const effectiveFurthest =
+      const effectivePage =
         book.status === 'completed'
           ? book.totalPages
-          : Math.max(0, Math.min(book.furthestPage, book.totalPages));
-      furthest += effectiveFurthest;
+          : Math.max(0, Math.min(book.currentPage, book.totalPages));
+      read += effectivePage;
     }
   }
   if (total === 0) return 0;
-  return Math.round((furthest / total) * 100);
+  return Math.round((read / total) * 100);
 }
 
 export function formatPageNumber(page: number, totalPages: number): string {

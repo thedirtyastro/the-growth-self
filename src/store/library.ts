@@ -6,6 +6,7 @@ import type {
   Highlight,
   HighlightColor,
   JournalEntry,
+  Progress,
   ReadingSession,
   Rect,
 } from '../types/models';
@@ -22,9 +23,26 @@ import {
   putHighlight,
   putJournalEntry,
   putPdfBlob,
+  putProgress,
   putSession,
+  saveProgressAndBook,
+  saveProgressBookAndSessions,
 } from '../lib/db';
-import { deriveBookStatus } from '../lib/domain/status';
+import {
+  applyChoice,
+  applyContentRange,
+  commitPosition,
+  createInitialProgress,
+  creditVisit,
+  deriveStatus,
+  readAgain,
+  resizeProgressArrays,
+  splitDurationByLocalDay,
+  type FinishChoice,
+  type FinishOutcome,
+  type Visit,
+  type WordCountLookup,
+} from '../lib/domain/reading';
 import { extractKeywords } from '../lib/domain/keywords';
 import { mergeUniqueTags, normalizeTag } from '../lib/domain/tags';
 import { generateSampleLibraryDataset } from '../lib/sampleLibrary';
@@ -55,6 +73,7 @@ interface LibraryState {
   hydrated: boolean;
   hydrating: boolean;
   books: Book[];
+  progressByBook: Record<string, Progress>;
   highlights: Highlight[];
   sessions: ReadingSession[];
   journal: JournalEntry[];
@@ -67,9 +86,27 @@ interface LibraryState {
   addBookTag: (bookId: string, rawTag: string) => Promise<void>;
   removeBookTag: (bookId: string, tag: string) => Promise<void>;
   setBookStatus: (bookId: string, status: BookStatus) => Promise<void>;
-  recordReadingProgress: (bookId: string, pageOpened: number, actualPdfPages?: number) => Promise<void>;
-  markCompleted: (bookId: string) => Promise<void>;
-  resetBookProgress: (bookId: string) => Promise<void>;
+
+  syncPdfMetadata: (
+    bookId: string,
+    actualPdfPages: number,
+    pageWordCounts?: (number | null)[]
+  ) => Promise<Progress | undefined>;
+  updateBookWordCounts: (bookId: string, pageWordCounts: (number | null)[]) => Promise<void>;
+  commitVisitAction: (
+    bookId: string,
+    visit: Visit | null,
+    wordsLookup: WordCountLookup,
+    endMs?: number
+  ) => Promise<Progress | undefined>;
+  setContentRange: (
+    bookId: string,
+    start: number,
+    end: number,
+    rangeDetected?: boolean
+  ) => Promise<Progress | undefined>;
+  applyFinishChoice: (bookId: string, choice: FinishChoice) => Promise<FinishOutcome | undefined>;
+  readBookAgain: (bookId: string) => Promise<Progress | undefined>;
 
   addHighlight: (input: {
     bookId: string;
@@ -100,10 +137,21 @@ interface LibraryState {
   clearLibrary: () => Promise<void>;
 }
 
+function getOrCreateProgress(
+  state: LibraryState,
+  book: Book
+): Progress {
+  return (
+    state.progressByBook[book.id] ??
+    createInitialProgress(book.id, book.totalPages, book.status, book.completedAt)
+  );
+}
+
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   hydrated: false,
   hydrating: false,
   books: [],
+  progressByBook: {},
   highlights: [],
   sessions: [],
   journal: [],
@@ -115,8 +163,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     try {
       const data = await loadAllLibraryData();
       useSettingsStore.getState().setFromDb(data.settings);
+      const progressByBook: Record<string, Progress> = {};
+      for (const p of data.progressList) {
+        progressByBook[p.bookId] = p;
+      }
       set({
         books: data.books.sort((a, b) => a.addedAt.localeCompare(b.addedAt)),
+        progressByBook,
         highlights: data.highlights,
         sessions: data.sessions,
         journal: data.journal.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
@@ -146,12 +199,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     const totalPages = Math.max(1, payload.totalPages);
     const initialStatus: BookStatus = payload.status ?? 'not-started';
-    const initialCurrentPage =
-      initialStatus === 'completed'
-        ? totalPages
-        : initialStatus === 'ongoing'
-          ? Math.min(totalPages, 1)
-          : 0;
+    const progress = createInitialProgress(id, totalPages, initialStatus, nowIso);
+    const derived = deriveStatus(progress);
 
     const book: Book = {
       id,
@@ -160,23 +209,26 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       category: normalizeTag(payload.category) || 'General',
       tags: mergeUniqueTags(payload.tags ?? []),
       totalPages,
-      currentPage: initialCurrentPage,
-      furthestPage: initialCurrentPage,
-      status: initialStatus,
+      currentPage: derived === 'not-started' ? 0 : progress.position,
+      status: derived,
+      completionType: progress.completionType,
       pdfFileId,
       coverDataUrl: payload.coverDataUrl,
       coverColor: payload.coverColor,
       synopsis: payload.synopsis?.trim() || undefined,
       publishedYear: payload.publishedYear,
       addedAt: nowIso,
-      startedAt: initialStatus !== 'not-started' ? nowIso : undefined,
-      completedAt: initialStatus === 'completed' ? nowIso : undefined,
-      lastReadAt: initialStatus !== 'not-started' ? nowIso : undefined,
+      startedAt: derived !== 'not-started' ? nowIso : undefined,
+      completedAt: progress.completedAt,
+      lastReadAt: derived !== 'not-started' ? nowIso : undefined,
     };
 
-    await putBook(book);
-    set((state) => ({ books: [...state.books, book] }));
-    return book;
+    const synced = await saveProgressAndBook(progress, book);
+    set((state) => ({
+      books: [...state.books, synced],
+      progressByBook: { ...state.progressByBook, [id]: progress },
+    }));
+    return synced;
   },
 
   updateBook: async (id, patch) => {
@@ -234,132 +286,212 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const existing = get().books.find((b) => b.id === bookId);
     if (!existing) return;
     const nowIso = new Date().toISOString();
-    let updated: Book;
+    const currentProgress = getOrCreateProgress(get(), existing);
+
+    let nextProgress: Progress;
     if (status === 'completed') {
-      updated = {
-        ...existing,
-        status: 'completed',
-        currentPage: existing.totalPages,
-        furthestPage: existing.totalPages,
-        startedAt: existing.startedAt ?? nowIso,
-        completedAt: existing.completedAt ?? nowIso,
-        lastReadAt: nowIso,
-      };
-    } else if (status === 'ongoing') {
-      const page =
-        existing.currentPage > 0 && existing.currentPage < existing.totalPages
-          ? existing.currentPage
-          : 1;
-      updated = {
-        ...existing,
-        status: 'ongoing',
-        currentPage: page,
-        furthestPage: Math.max(page, Math.min(existing.furthestPage, existing.totalPages)),
-        startedAt: existing.startedAt ?? nowIso,
-        completedAt: undefined,
-        lastReadAt: nowIso,
-      };
+      nextProgress = applyChoice(currentProgress, 'elsewhere', nowIso).progress;
+    } else if (status === 'not-started') {
+      nextProgress = createInitialProgress(bookId, existing.totalPages, 'not-started', nowIso);
     } else {
-      updated = {
-        ...existing,
-        status: 'not-started',
-        currentPage: 0,
-        furthestPage: 0,
-        startedAt: undefined,
+      nextProgress = {
+        ...currentProgress,
+        completionType: undefined,
         completedAt: undefined,
       };
     }
-    await putBook(updated);
+
+    const derived = status === 'ongoing' ? 'ongoing' : deriveStatus(nextProgress);
+    const bookToSave: Book = {
+      ...existing,
+      status: derived,
+      currentPage: derived === 'not-started' ? 0 : nextProgress.position,
+      completionType: nextProgress.completionType,
+      completedAt: nextProgress.completedAt,
+      startedAt: derived === 'not-started' ? undefined : existing.startedAt ?? nowIso,
+      lastReadAt: derived === 'not-started' ? existing.lastReadAt : nowIso,
+    };
+
+    const tx = await (await import('../lib/db')).getDb();
+    const idbTx = tx.transaction(['progress', 'books'], 'readwrite');
+    await idbTx.objectStore('progress').put(nextProgress);
+    await idbTx.objectStore('books').put(bookToSave);
+    await idbTx.done;
+
     set((state) => ({
-      books: state.books.map((b) => (b.id === bookId ? updated : b)),
+      books: state.books.map((b) => (b.id === bookId ? bookToSave : b)),
+      progressByBook: { ...state.progressByBook, [bookId]: nextProgress },
     }));
   },
 
   removeBook: async (id) => {
     const existing = get().books.find((b) => b.id === id);
     await deleteBookCascade(id, existing?.pdfFileId);
+    set((state) => {
+      const nextProgressMap = { ...state.progressByBook };
+      delete nextProgressMap[id];
+      return {
+        books: state.books.filter((b) => b.id !== id),
+        progressByBook: nextProgressMap,
+        highlights: state.highlights.filter((h) => h.bookId !== id),
+        sessions: state.sessions.filter((s) => s.bookId !== id),
+        journal: state.journal.filter((j) => j.bookId !== id),
+        bookmarks: state.bookmarks.filter((bm) => bm.bookId !== id),
+      };
+    });
+  },
+
+  syncPdfMetadata: async (bookId, actualPdfPages, pageWordCounts) => {
+    const existing = get().books.find((b) => b.id === bookId);
+    if (!existing) return undefined;
+    const currentProgress = getOrCreateProgress(get(), existing);
+    const safeTotal = Math.max(1, actualPdfPages);
+    const resized = resizeProgressArrays(currentProgress, safeTotal);
+
+    const updatedBook: Book = {
+      ...existing,
+      totalPages: safeTotal,
+      pageWordCounts: pageWordCounts ?? existing.pageWordCounts,
+    };
+    const syncedBook = await saveProgressAndBook(resized, updatedBook);
     set((state) => ({
-      books: state.books.filter((b) => b.id !== id),
-      highlights: state.highlights.filter((h) => h.bookId !== id),
-      sessions: state.sessions.filter((s) => s.bookId !== id),
-      journal: state.journal.filter((j) => j.bookId !== id),
-      bookmarks: state.bookmarks.filter((bm) => bm.bookId !== id),
+      books: state.books.map((b) => (b.id === bookId ? syncedBook : b)),
+      progressByBook: { ...state.progressByBook, [bookId]: resized },
+    }));
+    return resized;
+  },
+
+  updateBookWordCounts: async (bookId, pageWordCounts) => {
+    const existing = get().books.find((b) => b.id === bookId);
+    if (!existing) return;
+    const updated: Book = { ...existing, pageWordCounts };
+    await putBook(updated);
+    set((state) => ({
+      books: state.books.map((b) => (b.id === bookId ? updated : b)),
     }));
   },
 
-  recordReadingProgress: async (bookId, pageOpened, actualPdfPages) => {
+  commitVisitAction: async (bookId, visit, wordsLookup, endMs = Date.now()) => {
     const existing = get().books.find((b) => b.id === bookId);
-    if (!existing) return;
-    const nowIso = new Date().toISOString();
-    const effectiveTotal = Math.max(existing.totalPages, actualPdfPages ?? 0, 1);
-    const clampedPage = Math.max(1, Math.min(pageOpened, effectiveTotal));
-    const derived = deriveBookStatus({
-      currentStatus: existing.status,
-      pageOpened: clampedPage,
-      totalPages: effectiveTotal,
-      startedAt: existing.startedAt,
-      completedAt: existing.completedAt,
-      nowIso,
+    if (!existing || !visit || visit.activeMs <= 0) {
+      return existing ? getOrCreateProgress(get(), existing) : undefined;
+    }
+
+    const currentProgress = getOrCreateProgress(get(), existing);
+    let nextProgress = creditVisit(currentProgress, visit, wordsLookup);
+    nextProgress = commitPosition(nextProgress, visit);
+
+    const nowIso = new Date(endMs).toISOString();
+    const derived = deriveStatus(nextProgress);
+
+    // Split active reading time across midnight into local calendar day records
+    const slices = splitDurationByLocalDay(endMs, visit.activeMs);
+    const existingSessions = get().sessions;
+    const sessionsToPersist: ReadingSession[] = [];
+
+    for (const slice of slices) {
+      const sessionId = `day-${bookId}-${slice.date}`;
+      const prior =
+        sessionsToPersist.find((s) => s.id === sessionId) ??
+        existingSessions.find((s) => s.id === sessionId);
+
+      const creditedPages = visit.activeMs >= 1000 ? visit.pages : [];
+      const mergedPages = Array.from(
+        new Set([...(prior?.pagesViewed ?? []), ...creditedPages])
+      ).sort((a, b) => a - b);
+
+      const updatedSession: ReadingSession = {
+        id: sessionId,
+        bookId,
+        date: slice.date,
+        startedAt: prior?.startedAt ?? slice.startedAt,
+        endedAt: slice.endedAt,
+        durationSeconds: (prior?.durationSeconds ?? 0) + slice.activeMs / 1000,
+        pagesViewed: mergedPages,
+        pagesRead: mergedPages.length,
+      };
+      sessionsToPersist.push(updatedSession);
+    }
+
+    const updatedBook: Book = {
+      ...existing,
+      startedAt:
+        derived !== 'not-started' ? existing.startedAt ?? nowIso : existing.startedAt,
+      lastReadAt: visit.activeMs >= 1000 ? nowIso : existing.lastReadAt,
+    };
+
+    const syncedBook = await saveProgressBookAndSessions(
+      nextProgress,
+      updatedBook,
+      sessionsToPersist
+    );
+
+    set((state) => {
+      const nextSessionMap = new Map(state.sessions.map((s) => [s.id, s]));
+      for (const s of sessionsToPersist) {
+        nextSessionMap.set(s.id, s);
+      }
+      return {
+        books: state.books.map((b) => (b.id === bookId ? syncedBook : b)),
+        progressByBook: { ...state.progressByBook, [bookId]: nextProgress },
+        sessions: Array.from(nextSessionMap.values()),
+      };
     });
 
-    // If user is on page 1 and status is still not-started, keep currentPage at 0 in library metadata
-    const nextCurrentPage = derived.status === 'not-started' ? 0 : clampedPage;
-    const nextFurthest =
-      derived.status === 'completed'
-        ? effectiveTotal
-        : Math.max(existing.furthestPage, nextCurrentPage);
-
-    const updated: Book = {
-      ...existing,
-      totalPages: effectiveTotal,
-      currentPage: nextCurrentPage,
-      furthestPage: nextFurthest,
-      status: derived.status,
-      startedAt: derived.startedAt,
-      completedAt: derived.completedAt,
-      lastReadAt: nowIso,
-    };
-
-    await putBook(updated);
-    set((state) => ({
-      books: state.books.map((b) => (b.id === bookId ? updated : b)),
-    }));
+    return nextProgress;
   },
 
-  markCompleted: async (bookId) => {
+  setContentRange: async (bookId, start, end, rangeDetected = true) => {
     const existing = get().books.find((b) => b.id === bookId);
-    if (!existing) return;
+    if (!existing) return undefined;
+    const currentProgress = getOrCreateProgress(get(), existing);
+    const nextProgress = applyContentRange(currentProgress, start, end, rangeDetected);
+    const syncedBook = await saveProgressAndBook(nextProgress, existing);
+    set((state) => ({
+      books: state.books.map((b) => (b.id === bookId ? syncedBook : b)),
+      progressByBook: { ...state.progressByBook, [bookId]: nextProgress },
+    }));
+    return nextProgress;
+  },
+
+  applyFinishChoice: async (bookId, choice) => {
+    const existing = get().books.find((b) => b.id === bookId);
+    if (!existing) return undefined;
+    const currentProgress = getOrCreateProgress(get(), existing);
     const nowIso = new Date().toISOString();
-    const updated: Book = {
+    const outcome = applyChoice(currentProgress, choice, nowIso);
+
+    if (outcome.needsConfirm) {
+      return outcome;
+    }
+
+    const bookUpdate: Book = {
       ...existing,
-      status: 'completed',
-      currentPage: existing.totalPages,
-      furthestPage: existing.totalPages,
       startedAt: existing.startedAt ?? nowIso,
-      completedAt: existing.completedAt ?? nowIso,
       lastReadAt: nowIso,
     };
-    await putBook(updated);
+    const syncedBook = await saveProgressAndBook(outcome.progress, bookUpdate);
     set((state) => ({
-      books: state.books.map((b) => (b.id === bookId ? updated : b)),
+      books: state.books.map((b) => (b.id === bookId ? syncedBook : b)),
+      progressByBook: { ...state.progressByBook, [bookId]: outcome.progress },
     }));
+    return outcome;
   },
 
-  resetBookProgress: async (bookId) => {
+  readBookAgain: async (bookId) => {
     const existing = get().books.find((b) => b.id === bookId);
-    if (!existing) return;
-    const updated: Book = {
+    if (!existing) return undefined;
+    const currentProgress = getOrCreateProgress(get(), existing);
+    const nextProgress = readAgain(currentProgress);
+    const syncedBook = await saveProgressAndBook(nextProgress, {
       ...existing,
-      status: 'ongoing',
-      currentPage: 1,
-      startedAt: existing.startedAt ?? new Date().toISOString(),
-      completedAt: undefined,
       lastReadAt: new Date().toISOString(),
-    };
-    await putBook(updated);
+    });
     set((state) => ({
-      books: state.books.map((b) => (b.id === bookId ? updated : b)),
+      books: state.books.map((b) => (b.id === bookId ? syncedBook : b)),
+      progressByBook: { ...state.progressByBook, [bookId]: nextProgress },
     }));
+    return nextProgress;
   },
 
   addHighlight: async (input) => {
@@ -480,31 +612,6 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       next[idx] = session;
       return { sessions: next };
     });
-
-    // Ensure book transitions from not-started -> ongoing if session has meaningful time
-    if (session.durationSeconds >= 5) {
-      const book = get().books.find((b) => b.id === session.bookId);
-      if (book && book.status === 'not-started') {
-        const derived = deriveBookStatus({
-          currentStatus: book.status,
-          pageOpened: Math.max(1, book.currentPage),
-          totalPages: book.totalPages,
-          hasSessionLogged: true,
-        });
-        const updated: Book = {
-          ...book,
-          status: derived.status,
-          currentPage: Math.max(1, book.currentPage),
-          furthestPage: Math.max(1, book.furthestPage),
-          startedAt: derived.startedAt,
-          lastReadAt: session.endedAt,
-        };
-        await putBook(updated);
-        set((state) => ({
-          books: state.books.map((b) => (b.id === book.id ? updated : b)),
-        }));
-      }
-    }
   },
 
   loadSampleLibrary: async () => {
@@ -513,6 +620,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     await Promise.all([
       ...dataset.pdfBlobs.map((item) => putPdfBlob(item.pdfFileId, item.blob)),
       ...dataset.books.map((book) => putBook(book)),
+      ...dataset.progressList.map((p) => putProgress(p)),
       ...dataset.books
         .filter((b) => b.coverDataUrl)
         .map((b) => putCoverDataUrl(b.id, b.coverDataUrl!)),
@@ -522,8 +630,14 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       ...dataset.sessions.map((s) => putSession(s)),
     ]);
 
+    const progressByBook: Record<string, Progress> = {};
+    for (const p of dataset.progressList) {
+      progressByBook[p.bookId] = p;
+    }
+
     set({
       books: dataset.books,
+      progressByBook,
       highlights: dataset.highlights,
       journal: dataset.journal.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       bookmarks: dataset.bookmarks,
@@ -536,6 +650,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     await clearAllDbData();
     set({
       books: [],
+      progressByBook: {},
       highlights: [],
       journal: [],
       bookmarks: [],

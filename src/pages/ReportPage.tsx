@@ -4,11 +4,13 @@ import { BookOpen, Clock, Flame, TrendingUp } from 'lucide-react';
 import type { BookStatus } from '../types/models';
 import { useLibraryStore } from '../store/library';
 import { computeStreaks } from '../lib/domain/streaks';
+import { formatPageNumber } from '../lib/domain/status';
 import {
-  computeBookProgress,
-  computeOverallProgress,
-  formatPageNumber,
-} from '../lib/domain/status';
+  createInitialProgress,
+  deriveStatus,
+  overallProgress as computeOverallReadingProgress,
+  stats,
+} from '../lib/domain/reading';
 import { formatDurationCompact } from '../lib/domain/heatmap';
 import { aggregateKeywords, type KeywordInsight } from '../lib/domain/keywords';
 import { PageTransition } from '../components/shell/PageTransition';
@@ -23,6 +25,7 @@ type BookTab = 'all' | BookStatus;
 
 export function ReportPage() {
   const books = useLibraryStore((s) => s.books);
+  const progressByBook = useLibraryStore((s) => s.progressByBook);
   const sessions = useLibraryStore((s) => s.sessions);
   const highlights = useLibraryStore((s) => s.highlights);
   const journal = useLibraryStore((s) => s.journal);
@@ -37,30 +40,38 @@ export function ReportPage() {
   const currentYear = new Date().getFullYear();
   const hasSampleData = books.some((b) => b.isSample);
 
+  const getProgress = (b: typeof books[number]) =>
+    progressByBook[b.id] ?? createInitialProgress(b.id, b.totalPages, b.status, b.completedAt);
+
   const metrics = useMemo(() => computeStreaks(sessions, new Date()), [sessions]);
-  const overallProgress = useMemo(() => computeOverallProgress(books), [books]);
+  const overallProgress = useMemo(
+    () => computeOverallReadingProgress(books.map(getProgress)),
+    [books, progressByBook]
+  );
 
   const counts = useMemo(() => {
     let completed = 0;
     let ongoing = 0;
     let notStarted = 0;
     for (const b of books) {
-      if (b.status === 'completed') completed += 1;
-      else if (b.status === 'ongoing') ongoing += 1;
+      const st = deriveStatus(getProgress(b));
+      if (st === 'completed') completed += 1;
+      else if (st === 'ongoing') ongoing += 1;
       else notStarted += 1;
     }
     return { total: books.length, completed, ongoing, notStarted };
-  }, [books]);
+  }, [books, progressByBook]);
 
   const filteredBooks = useMemo(() => {
-    const base = bookTab === 'all' ? books : books.filter((b) => b.status === bookTab);
+    const base =
+      bookTab === 'all' ? books : books.filter((b) => deriveStatus(getProgress(b)) === bookTab);
     return [...base].sort((a, b) => {
       if (bookSort === 'title') return a.title.localeCompare(b.title);
-      const pa = a.status === 'completed' ? 100 : computeBookProgress(a.currentPage, a.totalPages);
-      const pb = b.status === 'completed' ? 100 : computeBookProgress(b.currentPage, b.totalPages);
+      const pa = stats(getProgress(a)).percent;
+      const pb = stats(getProgress(b)).percent;
       return pb - pa;
     });
-  }, [books, bookTab, bookSort]);
+  }, [books, progressByBook, bookTab, bookSort]);
 
   const keywords = useMemo(
     () => aggregateKeywords(highlights, journal).slice(0, 8),
@@ -284,18 +295,16 @@ export function ReportPage() {
             ) : (
               <div className="divide-y divide-[var(--border-soft)]">
                 {filteredBooks.map((book) => {
-                  const pct =
-                    book.status === 'completed'
-                      ? 100
-                      : book.status === 'not-started'
-                        ? 0
-                        : computeBookProgress(book.currentPage, book.totalPages);
+                  const prog = getProgress(book);
+                  const derivedStatus = deriveStatus(prog);
+                  const pct = stats(prog).percent;
+                  const displayPage = derivedStatus === 'not-started' ? 0 : prog.position;
 
                   return (
                     <Link
                       key={book.id}
                       to={`/books/${book.id}`}
-                      className="group grid grid-cols-[36px_1fr_150px] items-center gap-4 px-2 -mx-2 py-4 hover:bg-[var(--background)]/80 transition-colors duration-150"
+                      className="group grid grid-cols-[36px_1fr_165px] items-center gap-4 px-2 -mx-2 py-4 hover:bg-[var(--background)]/80 transition-colors duration-150"
                     >
                       <div
                         className="h-12 w-9 overflow-hidden border border-[var(--border-soft)] transition-transform duration-200 group-hover:-translate-y-0.5"
@@ -323,9 +332,9 @@ export function ReportPage() {
                       </div>
 
                       <div className="flex flex-col items-end gap-1.5">
-                        <Badge status={book.status} />
+                        <Badge status={derivedStatus} completionType={prog.completionType} />
                         <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--foreground-secondary)] tabular-nums">
-                          {formatPageNumber(book.currentPage, book.totalPages)} · {pct}%
+                          {formatPageNumber(displayPage, book.totalPages)} · {pct}% READ
                         </span>
                       </div>
                     </Link>

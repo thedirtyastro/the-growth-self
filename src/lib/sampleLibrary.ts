@@ -2,13 +2,16 @@ import { subDays, format } from 'date-fns';
 import type {
   Book,
   Bookmark,
+  CompletionType,
   Highlight,
   JournalEntry,
+  Progress,
   ReadingSession,
 } from '../types/models';
 import { extractKeywords } from './domain/keywords';
 import { buildTextPdfBlob, type SamplePdfPage } from './pdf/simplePdfGenerator';
 import { getContrastTextColor } from './domain/status';
+import { createInitialProgress } from './domain/reading';
 
 interface SampleBookSpec {
   id: string;
@@ -407,6 +410,7 @@ function renderEditorialCoverDataUrl(spec: SampleBookSpec): string {
 
 export interface GeneratedSampleDataset {
   books: Book[];
+  progressList: Progress[];
   pdfBlobs: Array<{ pdfFileId: string; blob: Blob }>;
   highlights: Highlight[];
   journal: JournalEntry[];
@@ -417,15 +421,16 @@ export interface GeneratedSampleDataset {
 export function generateSampleLibraryDataset(referenceDate: Date = new Date()): GeneratedSampleDataset {
   const nowIso = referenceDate.toISOString();
   const books: Book[] = [];
+  const progressList: Progress[] = [];
   const pdfBlobs: Array<{ pdfFileId: string; blob: Blob }> = [];
 
   for (let i = 0; i < SAMPLE_SPECS.length; i++) {
     const spec = SAMPLE_SPECS[i];
     const pdfFileId = `pdf-${spec.id}`;
 
-    // Pad sample pages so the PDF matches or supports navigation cleanly
+    // Pad sample pages so the generated PDF matches spec.totalPages accurately
     const pages: SamplePdfPage[] = [...spec.samplePages];
-    while (pages.length < Math.min(spec.totalPages, 12)) {
+    while (pages.length < spec.totalPages) {
       const idx = pages.length + 1;
       pages.push({
         heading: `Section ${idx}: Field Notes & Reflections`,
@@ -448,6 +453,49 @@ export function generateSampleLibraryDataset(referenceDate: Date = new Date()): 
         : spec.status === 'completed'
           ? subDays(referenceDate, 10 + i).toISOString()
           : undefined;
+    const completedAt =
+      spec.status === 'completed' ? subDays(referenceDate, 8 + i).toISOString() : undefined;
+
+    const completionType: CompletionType | undefined =
+      spec.status === 'completed'
+        ? spec.id === 'sample-essentialism'
+          ? 'skimmed'
+          : 'read'
+        : undefined;
+
+    const progress = createInitialProgress(spec.id, spec.totalPages, spec.status, completedAt);
+    progress.position = Math.max(1, spec.currentPage || 1);
+    progress.rangeDetected = true;
+    if (spec.status === 'completed') {
+      progress.completionType = completionType;
+      progress.completedAt = completedAt;
+      for (let pg = 1; pg <= spec.totalPages; pg++) {
+        progress.pageStates[pg] = completionType === 'skimmed' && pg % 3 !== 0 ? 1 : 2;
+        progress.dwellMs[pg] = completionType === 'skimmed' && pg % 3 !== 0 ? 4500 : 18_000;
+      }
+      const readPages = progress.pageStates.filter((s) => s === 2).length;
+      const skimmedPages = progress.pageStates.filter((s) => s === 1).length;
+      const activeMs = progress.dwellMs.reduce((a, b) => a + b, 0);
+      progress.completions = [
+        {
+          round: 1,
+          type: completionType ?? 'read',
+          completedAt: completedAt ?? nowIso,
+          readPages,
+          skimmedPages,
+          activeMs,
+        },
+      ];
+    } else if (spec.status === 'ongoing') {
+      const target = Math.min(spec.totalPages, Math.max(1, spec.currentPage));
+      for (let pg = 1; pg <= target; pg++) {
+        // Simulate realistic read + occasional skimmed gaps for honest PageMap
+        const isGap = pg > 12 && pg % 9 === 0;
+        progress.pageStates[pg] = isGap ? 1 : 2;
+        progress.dwellMs[pg] = isGap ? 3200 : 16_000;
+      }
+    }
+    progressList.push(progress);
 
     books.push({
       id: spec.id,
@@ -457,8 +505,8 @@ export function generateSampleLibraryDataset(referenceDate: Date = new Date()): 
       tags: spec.tags,
       totalPages: spec.totalPages,
       currentPage: spec.currentPage,
-      furthestPage: spec.currentPage,
       status: spec.status,
+      completionType,
       pdfFileId,
       coverDataUrl,
       coverColor: spec.coverColor,
@@ -466,7 +514,7 @@ export function generateSampleLibraryDataset(referenceDate: Date = new Date()): 
       publishedYear: spec.publishedYear,
       addedAt,
       startedAt: spec.status !== 'not-started' ? subDays(referenceDate, 28 - i).toISOString() : undefined,
-      completedAt: spec.status === 'completed' ? subDays(referenceDate, 8 + i).toISOString() : undefined,
+      completedAt,
       lastReadAt,
       isSample: true,
     });
@@ -645,5 +693,5 @@ export function generateSampleLibraryDataset(referenceDate: Date = new Date()): 
   // Ensure lastReadAt on Atomic Habits & The Alchemist reflects recent activity
   books[0].lastReadAt = nowIso;
 
-  return { books, pdfBlobs, highlights, journal, bookmarks, sessions };
+  return { books, progressList, pdfBlobs, highlights, journal, bookmarks, sessions };
 }

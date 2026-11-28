@@ -44,6 +44,7 @@ interface FlatReaderProps {
     anchorRect: DOMRect;
   }) => void;
   onSelectHighlight: (highlight: Highlight, anchorRect: DOMRect) => void;
+  onSettledChange?: (settled: boolean) => void;
 }
 
 const PAPER_BG: Record<ReaderAppearance, string> = {
@@ -233,6 +234,7 @@ export function FlatReader({
   onTextSelected,
   onAreaSelected,
   onSelectHighlight,
+  onSettledChange,
 }: FlatReaderProps) {
   const settings = useSettingsStore((s) => s.settings);
   const [renderedPages, setRenderedPages] = useState<Record<number, RenderedPageResult>>({});
@@ -243,11 +245,18 @@ export function FlatReader({
   useEffect(() => {
     const prev = prevPageRef.current;
     prevPageRef.current = currentPage;
-    if (prev === currentPage || settings.animation === 'off') return;
+    if (prev === currentPage || settings.animation === 'off') {
+      onSettledChange?.(true);
+      return;
+    }
+    onSettledChange?.(false);
     setFlipSweep(currentPage > prev ? 'forward' : 'backward');
-    const timer = window.setTimeout(() => setFlipSweep(null), 320);
+    const timer = window.setTimeout(() => {
+      setFlipSweep(null);
+      onSettledChange?.(true);
+    }, 320);
     return () => clearTimeout(timer);
-  }, [currentPage, settings.animation]);
+  }, [currentPage, settings.animation, onSettledChange]);
 
   const leftPageNum = isSpread ? (currentPage % 2 === 0 ? currentPage - 1 : currentPage) : currentPage;
   const rightPageNum = isSpread && leftPageNum + 1 <= totalPages ? leftPageNum + 1 : null;

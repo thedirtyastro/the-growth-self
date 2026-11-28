@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { formatPageNumber } from '../../lib/domain/status';
 
 interface ReaderControlsProps {
@@ -9,6 +10,8 @@ interface ReaderControlsProps {
   isFullscreen: boolean;
   hasTextLayer: boolean;
   areaHighlightMode: boolean;
+  onContentEnd?: boolean;
+  isCompleted?: boolean;
   onToggleAreaHighlight: () => void;
   onToggleNotes: () => void;
   onToggleBookmark: () => void;
@@ -17,6 +20,7 @@ interface ReaderControlsProps {
   onClose: () => void;
   onPrevPage: () => void;
   onNextPage: () => void;
+  onJumpToPage?: (page: number) => void;
 }
 
 export function ReaderControls({
@@ -28,6 +32,8 @@ export function ReaderControls({
   isFullscreen,
   hasTextLayer,
   areaHighlightMode,
+  onContentEnd = false,
+  isCompleted = false,
   onToggleAreaHighlight,
   onToggleNotes,
   onToggleBookmark,
@@ -36,8 +42,26 @@ export function ReaderControls({
   onClose,
   onPrevPage,
   onNextPage,
+  onJumpToPage,
 }: ReaderControlsProps) {
   const step = isSpread ? 2 : 1;
+  const [editingPage, setEditingPage] = useState(false);
+  const [pageDraft, setPageDraft] = useState('');
+
+  const atLastSpread = isSpread
+    ? (currentPage % 2 === 0 ? currentPage : currentPage + 1) >= totalPages
+    : currentPage >= totalPages;
+
+  const canAdvanceForEndPrompt = onContentEnd && !isCompleted;
+
+  const submitPageJump = (e: React.FormEvent) => {
+    e.preventDefault();
+    const num = Math.round(Number(pageDraft));
+    if (Number.isFinite(num) && num >= 1 && num <= totalPages && onJumpToPage) {
+      onJumpToPage(num);
+    }
+    setEditingPage(false);
+  };
 
   return (
     <div
@@ -127,7 +151,7 @@ export function ReaderControls({
 
       {/* Bottom Center Navigation */}
       <footer
-        className={`pointer-events-auto flex h-14 items-center justify-center gap-8 md:gap-12 px-4 transition-colors ${
+        className={`pointer-events-auto flex h-14 items-center justify-center gap-6 md:gap-10 px-4 transition-colors ${
           isFullscreen
             ? 'bg-gradient-to-t from-[var(--reader-bg)]/95 via-[var(--reader-bg)]/75 to-transparent'
             : ''
@@ -142,20 +166,52 @@ export function ReaderControls({
           PREVIOUS PAGE
         </button>
 
-        <span
-          data-testid="reader-page-indicator"
-          className="editorial-label tabular-nums text-[var(--foreground)]"
-        >
-          {formatPageNumber(currentPage, totalPages)}
-        </span>
+        {editingPage && onJumpToPage ? (
+          <form onSubmit={submitPageJump} className="inline-flex items-center gap-1.5">
+            <label htmlFor="reader-jump-page-input" className="sr-only">
+              Jump to page number
+            </label>
+            <input
+              id="reader-jump-page-input"
+              type="number"
+              min={1}
+              max={totalPages}
+              autoFocus
+              value={pageDraft}
+              onChange={(e) => setPageDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.stopPropagation();
+                  setEditingPage(false);
+                }
+              }}
+              onBlur={() => setEditingPage(false)}
+              placeholder={String(currentPage)}
+              className="h-8 w-20 border border-[var(--border-strong)] bg-[var(--paper)] px-2 text-center text-xs tabular-nums text-[var(--foreground)]"
+            />
+            <span className="editorial-label tabular-nums text-[var(--foreground-secondary)]">
+              / {totalPages}
+            </span>
+          </form>
+        ) : (
+          <button
+            type="button"
+            data-testid="reader-page-indicator"
+            aria-label={`Current page ${currentPage} of ${totalPages}. Activate to jump to page.`}
+            onClick={() => {
+              if (!onJumpToPage) return;
+              setPageDraft(String(currentPage));
+              setEditingPage(true);
+            }}
+            className="inline-flex h-11 items-center px-2 editorial-label tabular-nums text-[var(--foreground)] hover:text-[var(--accent-hover)] transition-colors cursor-pointer"
+          >
+            {formatPageNumber(currentPage, totalPages)}
+          </button>
+        )}
 
         <button
           type="button"
-          disabled={
-            isSpread
-              ? (currentPage % 2 === 0 ? currentPage : currentPage + 1) >= totalPages
-              : currentPage >= totalPages
-          }
+          disabled={atLastSpread && !canAdvanceForEndPrompt}
           onClick={onNextPage}
           className="inline-flex h-11 items-center px-2 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--foreground)] hover:text-[var(--accent-hover)] disabled:opacity-35 disabled:pointer-events-none transition-colors cursor-pointer"
         >

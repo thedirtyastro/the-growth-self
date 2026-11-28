@@ -5,14 +5,20 @@ import {
   type Bookmark,
   type Highlight,
   type JournalEntry,
+  type Progress,
   type ReadingSession,
   type Settings,
 } from '../types/models';
+import { deriveStatus, migrateLegacy } from './domain/reading';
 
 interface GrowthShelfDB extends DBSchema {
   books: {
     key: string;
     value: Book;
+  };
+  progress: {
+    key: string;
+    value: Progress;
   };
   pdfs: {
     key: string;
@@ -59,16 +65,19 @@ interface GrowthShelfDB extends DBSchema {
 }
 
 const DB_NAME = 'growth-shelf';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBPDatabase<GrowthShelfDB>> | null = null;
 
 export function getDb(): Promise<IDBPDatabase<GrowthShelfDB>> {
   if (!dbPromise) {
     dbPromise = openDB<GrowthShelfDB>(DB_NAME, DB_VERSION, {
-      upgrade(db) {
+      async upgrade(db, oldVersion, _newVersion, transaction) {
         if (!db.objectStoreNames.contains('books')) {
           db.createObjectStore('books', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('progress')) {
+          db.createObjectStore('progress', { keyPath: 'bookId' });
         }
         if (!db.objectStoreNames.contains('pdfs')) {
           db.createObjectStore('pdfs');
@@ -97,6 +106,31 @@ export function getDb(): Promise<IDBPDatabase<GrowthShelfDB>> {
         if (!db.objectStoreNames.contains('settings')) {
           db.createObjectStore('settings');
         }
+
+        // Migrate legacy books + sessions from v1 into v2 progress store
+        if (oldVersion > 0 && oldVersion < 2) {
+          const bookStore = transaction.objectStore('books');
+          const sessStore = transaction.objectStore('sessions');
+          const progStore = transaction.objectStore('progress');
+          const [legacyBooks, legacySessions] = await Promise.all([
+            bookStore.getAll(),
+            sessStore.getAll(),
+          ]);
+
+          for (const raw of legacyBooks as Array<Book & { furthestPage?: number }>) {
+            const migrated = migrateLegacy(raw, legacySessions, raw.totalPages);
+            await progStore.put(migrated);
+            const { furthestPage: _removed, ...rest } = raw;
+            const status = deriveStatus(migrated);
+            await bookStore.put({
+              ...rest,
+              status,
+              currentPage: status === 'not-started' ? 0 : migrated.position,
+              completionType: migrated.completionType,
+              completedAt: migrated.completedAt ?? rest.completedAt,
+            });
+          }
+        }
       },
     });
   }
@@ -105,17 +139,55 @@ export function getDb(): Promise<IDBPDatabase<GrowthShelfDB>> {
 
 export async function loadAllLibraryData() {
   const db = await getDb();
-  const [books, highlights, sessions, journal, bookmarks, settings] = await Promise.all([
-    db.getAll('books'),
-    db.getAll('highlights'),
-    db.getAll('sessions'),
-    db.getAll('journal'),
-    db.getAll('bookmarks'),
-    db.get('settings', 'user'),
-  ]);
+  const [books, progressList, highlights, sessions, journal, bookmarks, settings] =
+    await Promise.all([
+      db.getAll('books'),
+      db.getAll('progress'),
+      db.getAll('highlights'),
+      db.getAll('sessions'),
+      db.getAll('journal'),
+      db.getAll('bookmarks'),
+      db.get('settings', 'user'),
+    ]);
+
+  // Backfill any missing Progress records defensively
+  const progressMap = new Map<string, Progress>();
+  for (const p of progressList) {
+    progressMap.set(p.bookId, p);
+  }
+
+  const missing: Array<{ book: Book; progress: Progress }> = [];
+  for (const b of books) {
+    if (!progressMap.has(b.id)) {
+      const migrated = migrateLegacy(b, sessions, b.totalPages);
+      const status = deriveStatus(migrated);
+      const cleanBook: Book = {
+        ...b,
+        status,
+        currentPage: status === 'not-started' ? 0 : migrated.position,
+        completionType: migrated.completionType,
+        completedAt: migrated.completedAt ?? b.completedAt,
+      };
+      progressMap.set(b.id, migrated);
+      missing.push({ book: cleanBook, progress: migrated });
+    }
+  }
+
+  if (missing.length > 0) {
+    const tx = db.transaction(['books', 'progress'], 'readwrite');
+    for (const item of missing) {
+      await tx.objectStore('progress').put(item.progress);
+      await tx.objectStore('books').put(item.book);
+    }
+    await tx.done;
+  }
 
   return {
-    books,
+    books: books.map((b) => {
+      const updated = missing.find((m) => m.book.id === b.id);
+      return updated ? updated.book : b;
+    }),
+    progressList: Array.from(progressMap.values()),
     highlights,
     sessions,
     journal,
@@ -129,13 +201,63 @@ export async function putBook(book: Book): Promise<void> {
   await db.put('books', book);
 }
 
+export async function putProgress(progress: Progress): Promise<void> {
+  const db = await getDb();
+  await db.put('progress', progress);
+}
+
+export async function saveProgressAndBook(
+  progress: Progress,
+  book: Book
+): Promise<Book> {
+  const db = await getDb();
+  const derived = deriveStatus(progress);
+  const syncedBook: Book = {
+    ...book,
+    status: derived,
+    currentPage: derived === 'not-started' ? 0 : progress.position,
+    completionType: progress.completionType,
+    completedAt: progress.completedAt,
+  };
+  const tx = db.transaction(['progress', 'books'], 'readwrite');
+  await tx.objectStore('progress').put(progress);
+  await tx.objectStore('books').put(syncedBook);
+  await tx.done;
+  return syncedBook;
+}
+
+export async function saveProgressBookAndSessions(
+  progress: Progress,
+  book: Book,
+  sessions: ReadingSession[]
+): Promise<Book> {
+  const db = await getDb();
+  const derived = deriveStatus(progress);
+  const syncedBook: Book = {
+    ...book,
+    status: derived,
+    currentPage: derived === 'not-started' ? 0 : progress.position,
+    completionType: progress.completionType,
+    completedAt: progress.completedAt,
+  };
+  const tx = db.transaction(['progress', 'books', 'sessions'], 'readwrite');
+  await tx.objectStore('progress').put(progress);
+  await tx.objectStore('books').put(syncedBook);
+  for (const s of sessions) {
+    await tx.objectStore('sessions').put(s);
+  }
+  await tx.done;
+  return syncedBook;
+}
+
 export async function deleteBookCascade(bookId: string, pdfFileId?: string): Promise<void> {
   const db = await getDb();
   const tx = db.transaction(
-    ['books', 'pdfs', 'covers', 'highlights', 'sessions', 'journal', 'bookmarks'],
+    ['books', 'progress', 'pdfs', 'covers', 'highlights', 'sessions', 'journal', 'bookmarks'],
     'readwrite'
   );
   await tx.objectStore('books').delete(bookId);
+  await tx.objectStore('progress').delete(bookId);
   if (pdfFileId) {
     await tx.objectStore('pdfs').delete(pdfFileId);
   }
@@ -214,11 +336,12 @@ export async function saveSettingsDb(settings: Settings): Promise<void> {
 export async function clearAllDbData(): Promise<void> {
   const db = await getDb();
   const tx = db.transaction(
-    ['books', 'pdfs', 'covers', 'highlights', 'sessions', 'journal', 'bookmarks'],
+    ['books', 'progress', 'pdfs', 'covers', 'highlights', 'sessions', 'journal', 'bookmarks'],
     'readwrite'
   );
   await Promise.all([
     tx.objectStore('books').clear(),
+    tx.objectStore('progress').clear(),
     tx.objectStore('pdfs').clear(),
     tx.objectStore('covers').clear(),
     tx.objectStore('highlights').clear(),

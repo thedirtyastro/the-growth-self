@@ -56,9 +56,9 @@ test('computeBookProgress and computeOverallProgress calculate accurate percenta
   assert.equal(computeBookProgress(0, 280), 0);
   assert.equal(
     computeOverallProgress([
-      { furthestPage: 68, totalPages: 320, status: 'ongoing' },
-      { furthestPage: 200, totalPages: 256, status: 'completed' }, // uses 256
-      { furthestPage: 0, totalPages: 280, status: 'not-started' },
+      { currentPage: 68, totalPages: 320, status: 'ongoing' },
+      { currentPage: 200, totalPages: 256, status: 'completed' }, // uses 256
+      { currentPage: 0, totalPages: 280, status: 'not-started' },
     ]),
     Math.round(((68 + 256) / (320 + 256 + 280)) * 100)
   );
@@ -243,7 +243,6 @@ test('collectLibraryTags aggregates genres, custom tags, and status counts accur
       tags: ['Classic', 'Stoicism'],
       totalPages: 256,
       currentPage: 256,
-      furthestPage: 256,
       status: 'completed',
       coverColor: '#4F6373',
       addedAt: '2026-11-01T00:00:00Z',
@@ -256,7 +255,6 @@ test('collectLibraryTags aggregates genres, custom tags, and status counts accur
       tags: ['Habits', 'Systems'],
       totalPages: 320,
       currentPage: 68,
-      furthestPage: 68,
       status: 'ongoing',
       coverColor: '#2D4438',
       addedAt: '2026-11-02T00:00:00Z',
@@ -269,7 +267,6 @@ test('collectLibraryTags aggregates genres, custom tags, and status counts accur
       tags: ['classic', 'Time'],
       totalPages: 288,
       currentPage: 0,
-      furthestPage: 0,
       status: 'not-started',
       coverColor: '#70543E',
       addedAt: '2026-11-03T00:00:00Z',
@@ -299,7 +296,6 @@ test('filterBooksByTags filters by status, genre, and custom tags in AND and OR 
       tags: ['Classic', 'Stoicism'],
       totalPages: 256,
       currentPage: 256,
-      furthestPage: 256,
       status: 'completed',
       coverColor: '#4F6373',
       addedAt: '2026-11-01T00:00:00Z',
@@ -312,7 +308,6 @@ test('filterBooksByTags filters by status, genre, and custom tags in AND and OR 
       tags: ['Habits', 'Systems'],
       totalPages: 320,
       currentPage: 68,
-      furthestPage: 68,
       status: 'ongoing',
       coverColor: '#2D4438',
       addedAt: '2026-11-02T00:00:00Z',
@@ -325,7 +320,6 @@ test('filterBooksByTags filters by status, genre, and custom tags in AND and OR 
       tags: ['Classic', 'Time'],
       totalPages: 288,
       currentPage: 0,
-      furthestPage: 0,
       status: 'not-started',
       coverColor: '#70543E',
       addedAt: '2026-11-03T00:00:00Z',

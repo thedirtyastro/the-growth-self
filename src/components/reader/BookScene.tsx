@@ -46,6 +46,7 @@ interface BookSceneProps {
     anchorRect: DOMRect;
   }) => void;
   onSelectHighlight: (highlight: Highlight, anchorRect: DOMRect) => void;
+  onSettledChange?: (settled: boolean) => void;
 }
 
 interface ScreenBox {
@@ -269,6 +270,7 @@ export function BookScene({
   onTextSelected,
   onAreaSelected,
   onSelectHighlight,
+  onSettledChange,
 }: BookSceneProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const settings = useSettingsStore((s) => s.settings);
@@ -296,11 +298,13 @@ export function BookScene({
     onPageChangeRequest,
     onCloseComplete,
     onWebglFailure,
+    onSettledChange,
   });
   callbacksRef.current = {
     onPageChangeRequest,
     onCloseComplete,
     onWebglFailure,
+    onSettledChange,
   };
 
   const pageNumsRef = useRef({ leftPageNum, rightPageNum, totalPages });
@@ -616,6 +620,7 @@ export function BookScene({
     };
 
     const syncOverlayBoxes = (atRest: boolean) => {
+      callbacksRef.current.onSettledChange?.(atRest);
       if (!atRest) {
         setOverlayBoxes((prev) => (prev.atRest ? { ...prev, atRest: false } : prev));
         return;

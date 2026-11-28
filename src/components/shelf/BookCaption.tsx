@@ -1,6 +1,8 @@
 import { Link } from 'react-router-dom';
 import type { Book } from '../../types/models';
-import { computeBookProgress, formatPageNumber } from '../../lib/domain/status';
+import { formatPageNumber } from '../../lib/domain/status';
+import { createInitialProgress, deriveStatus, stats } from '../../lib/domain/reading';
+import { useLibraryStore } from '../../store/library';
 import { Badge } from '../shell/Badge';
 import { ProgressLine } from '../shell/ProgressLine';
 
@@ -10,17 +12,19 @@ interface BookCaptionProps {
 }
 
 export function BookCaption({ book, onRead }: BookCaptionProps) {
-  const progress =
-    book.status === 'completed'
-      ? 100
-      : book.status === 'not-started'
-        ? 0
-        : computeBookProgress(book.currentPage, book.totalPages);
+  const progress = useLibraryStore(
+    (s) =>
+      s.progressByBook[book.id] ??
+      createInitialProgress(book.id, book.totalPages, book.status, book.completedAt)
+  );
+  const status = deriveStatus(progress);
+  const s = stats(progress);
+  const displayPage = status === 'not-started' ? 0 : progress.position;
 
   const actionLabel =
-    book.status === 'completed'
+    status === 'completed'
       ? 'READ AGAIN'
-      : book.status === 'not-started'
+      : status === 'not-started'
         ? 'START READING'
         : 'CONTINUE READING';
 
@@ -42,12 +46,15 @@ export function BookCaption({ book, onRead }: BookCaptionProps) {
       </div>
 
       <div className="flex flex-wrap items-center gap-5 md:gap-7">
-        <Badge status={book.status} />
+        <Badge status={status} completionType={progress.completionType} />
         <span className="editorial-label tabular-nums text-[var(--foreground)]">
-          {formatPageNumber(book.currentPage, book.totalPages)}
+          {formatPageNumber(displayPage, book.totalPages)}
         </span>
-        <div className="w-[140px] sm:w-[160px]">
-          <ProgressLine percent={progress} />
+        <div className="w-[140px] sm:w-[160px] space-y-1">
+          <ProgressLine percent={s.percent} />
+          <p className="text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--foreground-secondary)] tabular-nums">
+            {s.percent}% READ
+          </p>
         </div>
         <button
           type="button"

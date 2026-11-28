@@ -128,3 +128,28 @@ export async function openPdfDocument(
 
   return loadingTask.promise;
 }
+
+export async function extractPageWordCount(
+  pdf: pdfjsLib.PDFDocumentProxy,
+  pageNumber: number
+): Promise<number | null> {
+  if (pageNumber < 1 || pageNumber > pdf.numPages) return null;
+  const page = await pdf.getPage(pageNumber);
+  try {
+    const content = await page.getTextContent();
+    let totalWords = 0;
+    let hasNonSpace = false;
+    for (const item of content.items) {
+      if (!('str' in item) || !item.str) continue;
+      const trimmed = item.str.trim();
+      if (!trimmed) continue;
+      hasNonSpace = true;
+      totalWords += trimmed.split(/\s+/).length;
+    }
+    return hasNonSpace ? totalWords : null;
+  } catch {
+    return null;
+  } finally {
+    page.cleanup();
+  }
+}

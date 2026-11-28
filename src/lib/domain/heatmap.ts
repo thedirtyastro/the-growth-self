@@ -97,7 +97,7 @@ export function mergeDailySessions(sessions: ReadingSession[]): Map<string, Dail
 
     books.sort((a, b) => b.durationSeconds - a.durationSeconds);
 
-    const minutes = Math.floor(totalDuration / 60);
+    const minutes = Math.round(totalDuration / 60);
     result.set(date, {
       date,
       durationSeconds: totalDuration,
@@ -179,7 +179,7 @@ export function buildHeatmapGrid(
 }
 
 export function formatDurationCompact(totalSeconds: number): string {
-  const totalMinutes = Math.floor(Math.max(0, totalSeconds) / 60);
+  const totalMinutes = Math.round(Math.max(0, totalSeconds) / 60);
   const hours = Math.floor(totalMinutes / 60);
   const mins = totalMinutes % 60;
   if (hours === 0) return `${mins}m`;

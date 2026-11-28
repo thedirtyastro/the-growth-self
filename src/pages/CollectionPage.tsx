@@ -4,7 +4,8 @@ import { FolderOpen, LayoutGrid, Plus, Rows3, Sparkles, Tag, X } from 'lucide-re
 import type { BookStatus } from '../types/models';
 import { useLibraryStore } from '../store/library';
 import { useUiStore } from '../store/ui';
-import { computeBookProgress, formatPageNumber } from '../lib/domain/status';
+import { formatPageNumber } from '../lib/domain/status';
+import { createInitialProgress, deriveStatus, stats } from '../lib/domain/reading';
 import {
   collectLibraryTags,
   filterBooksByTags,
@@ -36,6 +37,7 @@ function isSelected(list: string[], value: string): boolean {
 
 export function CollectionPage() {
   const books = useLibraryStore((s) => s.books);
+  const progressByBook = useLibraryStore((s) => s.progressByBook);
   const hydrated = useLibraryStore((s) => s.hydrated);
   const loadSampleLibrary = useLibraryStore((s) => s.loadSampleLibrary);
   const openAddBook = useUiStore((s) => s.openAddBook);
@@ -92,12 +94,14 @@ export function CollectionPage() {
       matchMode,
     });
 
+    const getProgress = (bookId: string, totalPages: number, status: BookStatus, completedAt?: string) =>
+      progressByBook[bookId] ?? createInitialProgress(bookId, totalPages, status, completedAt);
+
     return [...matching].sort((a, b) => {
+      const pa = getProgress(a.id, a.totalPages, a.status, a.completedAt);
+      const pb = getProgress(b.id, b.totalPages, b.status, b.completedAt);
       if (sort === 'progress') {
-        return (
-          computeBookProgress(b.currentPage, b.totalPages) -
-          computeBookProgress(a.currentPage, a.totalPages)
-        );
+        return stats(pb).percent - stats(pa).percent;
       }
       if (sort === 'completed') {
         if (a.status === 'completed' && b.status !== 'completed') return -1;
@@ -111,7 +115,7 @@ export function CollectionPage() {
       }
       return (b.lastReadAt ?? b.addedAt).localeCompare(a.lastReadAt ?? a.addedAt);
     });
-  }, [books, filter, selectedGenres, selectedTags, matchMode, sort]);
+  }, [books, progressByBook, filter, selectedGenres, selectedTags, matchMode, sort]);
 
   const filterTabs: Array<{ id: FilterTab; label: string; count: number }> = [
     { id: 'all', label: 'ALL', count: tagSummary.statusCounts.all },
@@ -399,12 +403,12 @@ export function CollectionPage() {
         ) : (
           <div className="mt-10 grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-x-8 gap-y-12">
             {filteredBooks.map((book) => {
-              const progress =
-                book.status === 'completed'
-                  ? 100
-                  : book.status === 'not-started'
-                    ? 0
-                    : computeBookProgress(book.currentPage, book.totalPages);
+              const prog =
+                progressByBook[book.id] ??
+                createInitialProgress(book.id, book.totalPages, book.status, book.completedAt);
+              const derivedStatus = deriveStatus(prog);
+              const readStats = stats(prog);
+              const displayPage = derivedStatus === 'not-started' ? 0 : prog.position;
 
               return (
                 <article key={book.id} className="flex flex-col">
@@ -431,20 +435,20 @@ export function CollectionPage() {
                         type="button"
                         onClick={() =>
                           updateFilters({
-                            status: filter === book.status ? 'all' : book.status,
+                            status: filter === derivedStatus ? 'all' : derivedStatus,
                           })
                         }
-                        aria-label={`Filter by status ${book.status}`}
+                        aria-label={`Filter by status ${derivedStatus}`}
                         className="editorial-chip cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--foreground)] focus-visible:outline-offset-2"
                       >
-                        <Badge status={book.status} />
+                        <Badge status={derivedStatus} completionType={prog.completionType} />
                       </button>
                       <span className="editorial-label tabular-nums text-[var(--foreground-secondary)]">
-                        {formatPageNumber(book.currentPage, book.totalPages).replace('PAGE ', '')}
+                        {formatPageNumber(displayPage, book.totalPages).replace('PAGE ', '')} · {readStats.percent}% READ
                       </span>
                     </div>
 
-                    <ProgressLine percent={progress} />
+                    <ProgressLine percent={readStats.percent} />
 
                     <div className="flex flex-wrap gap-1.5 pt-1">
                       <button
